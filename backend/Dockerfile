@@ -68,5 +68,7 @@ USER app
 EXPOSE 8000
 
 # Launch command (ТЗ §36): uvicorn bound to VOICE_BIND_HOST:VOICE_BIND_PORT.
-# Shell form so the env vars expand at container start (defaults via `:-`).
-CMD uvicorn backend.src.voice_gateway.app:app --host ${VOICE_BIND_HOST:-0.0.0.0} --port ${VOICE_BIND_PORT:-8000}
+# `exec` replaces the shell so uvicorn IS PID 1 and receives SIGTERM/SIGINT
+# directly (graceful shutdown under compose down / k8s; keeps the shell-form
+# env-var expansion the launch command needs).
+CMD ["sh", "-c", "exec uvicorn backend.src.voice_gateway.app:app --host ${VOICE_BIND_HOST:-0.0.0.0} --port ${VOICE_BIND_PORT:-8000}"]

@@ -1,0 +1,20 @@
+# Runtime dependencies of the Voice Gateway backend (ТЗ §37).
+#
+# Pinned for reproducible, deterministic builds (the acceptance criterion
+# is an image built from a clean checkout). Only what the gateway needs to
+# boot and serve at runtime — no test or build tooling:
+#
+#   fastapi / uvicorn   HTTP server + ASGI app (launch: ТЗ §36)
+#   httpx               OpenAI-compatible STT / Hermes HTTP clients (ТЗ §20/§21)
+#   pydantic            request / metadata models (ТЗ §19)
+#   prometheus-client   /metrics endpoint (ТЗ §34)
+#   anyio               async streaming ingest (ТЗ §17)
+#
+# Versions mirror the project's working virtualenv (Python 3.12).
+
+fastapi==0.133.1
+uvicorn==0.41.0
+httpx==0.28.1
+pydantic==2.13.4
+prometheus-client==0.26.0
+anyio==4.12.1

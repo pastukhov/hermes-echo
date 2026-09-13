@@ -105,6 +105,8 @@ class TestSuccessfulRequest:
         assert b"whisper-1" in seen["body"]
         assert b'name="file"' in seen["body"]
         assert b'name="model"' in seen["body"]
+        # The file part declares audio/wav (ТЗ section 20)
+        assert b"audio/wav" in seen["body"]
 
     def test_no_api_key_means_no_auth_header(self, tmp_path):
         wav = _write_wav(tmp_path)

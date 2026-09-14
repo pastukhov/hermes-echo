@@ -70,16 +70,6 @@ class TestSuccessfulRequest:
         result = client.transcribe(wav)
         assert result == Transcript(text="Привет, мир.", language="ru")
 
-    def test_language_defaults_when_absent(self, tmp_path):
-        wav = _write_wav(tmp_path)
-        transport = httpx.MockTransport(
-            lambda req: _ok_response("hello", language=None)
-        )
-        client = _make_client(transport)
-        result = client.transcribe(wav)
-        assert result.text == "hello"
-        assert result.language == "auto"
-
     def test_request_shape(self, tmp_path):
         wav = _write_wav(tmp_path)
         seen: dict = {}
@@ -202,17 +192,39 @@ class TestFailurePaths:
         with pytest.raises(STTClientError, match="text"):
             client.transcribe(wav)
 
-    def test_timeout_raises_stt_client_error(self, tmp_path):
+    def test_missing_language_field_raises(self, tmp_path):
+        wav = _write_wav(tmp_path)
+        transport = httpx.MockTransport(
+            lambda req: _ok_response("hello", language=None)
+        )
+        client = _make_client(transport)
+        with pytest.raises(STTClientError, match="language"):
+            client.transcribe(wav)
+
+    def test_non_string_language_raises(self, tmp_path):
+        wav = _write_wav(tmp_path)
+        transport = httpx.MockTransport(
+            lambda req: httpx.Response(200, json={"text": "hello", "language": 42})
+        )
+        client = _make_client(transport)
+        with pytest.raises(STTClientError, match="language"):
+            client.transcribe(wav)
+
+    def test_timeout_raises_stt_client_error(self, tmp_path, caplog):
         wav = _write_wav(tmp_path)
 
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ReadTimeout("read timed out", request=request)
 
         client = _make_client(httpx.MockTransport(handler))
-        with pytest.raises(STTClientError, match="failed") as excinfo:
+        with caplog.at_level(logging.WARNING), pytest.raises(
+            STTClientError, match="failed"
+        ) as excinfo:
             client.transcribe(wav)
         # API key must not leak into the exception text (ТЗ section 33)
         assert API_KEY not in str(excinfo.value)
+        assert API_KEY not in repr(excinfo.value)
+        assert API_KEY not in caplog.text
 
     def test_connection_error_raises(self, tmp_path):
         wav = _write_wav(tmp_path)

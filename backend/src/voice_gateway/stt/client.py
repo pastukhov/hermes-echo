@@ -104,7 +104,9 @@ class OpenAICompatibleSTT(STTProvider):
         if not isinstance(text, str) or not text.strip():
             raise STTClientError("stt response is missing a non-empty 'text' field")
         language = body.get("language")
-        return Transcript(text=text, language=language or "auto")
+        if not isinstance(language, str) or not language.strip():
+            raise STTClientError("stt response is missing a non-empty 'language' field")
+        return Transcript(text=text, language=language)
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client (idempotent)."""

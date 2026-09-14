@@ -14,11 +14,26 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI
 
-from backend.src.voice_gateway.app import create_app
+from backend.src.voice_gateway.app import FALLBACK_REPLY, create_app
+from backend.src.voice_gateway.hermes.base import HermesClient, HermesClientError
+from backend.src.voice_gateway.hermes.fake import FakeHermes
+from backend.src.voice_gateway.models import Transcript
+from backend.src.voice_gateway.stt.base import STTClientError, STTProvider
+from backend.src.voice_gateway.stt.fake import FakeSTT
+
+_VALID_HERMES_RAW = (
+    '{"reply": "Готово.", "note": {"create": false, "title": "", '
+    '"content": "", "tags": []}}'
+)
 
 
-def _make_app(tmp_path: Path) -> FastAPI:
-    return create_app(archive_root=tmp_path / "archive")
+def _make_app(tmp_path: Path,
+              hermes: HermesClient | None = None) -> FastAPI:
+    return create_app(
+        archive_root=tmp_path / "archive",
+        stt=FakeSTT(Transcript(text="тестовая расшифровка", language="ru")),
+        hermes=hermes if hermes is not None else FakeHermes(_VALID_HERMES_RAW),
+    )
 
 
 def _client(app: FastAPI) -> httpx.AsyncClient:
@@ -216,7 +231,9 @@ def test_turn_invalid_sample_rate_falls_back(tmp_path: Path) -> None:
 
 
 def test_health_after_many_turns(tmp_path: Path) -> None:
-    app = _make_app(tmp_path)
+    # _MultiCallHermes: the shared single-call FakeHermes raises on the 2nd
+    # turn; a load test needs a stand-in that serves every turn.
+    app = _make_app(tmp_path, hermes=_MultiCallHermes())
     pcm = b"\x00" * 2000
 
     async def run() -> None:
@@ -235,3 +252,270 @@ def test_health_after_many_turns(tmp_path: Path) -> None:
     resp = _run(asyncio.new_event_loop(), run_health())
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# STT → Hermes pipeline (ТЗ §21–24, §30, §32) — providers injected as fakes
+# ---------------------------------------------------------------------------
+
+class _RaisingSTT(STTProvider):
+    """STT stand-in that fails at the transport level (ТЗ §20)."""
+
+    def transcribe(self, wav: Path) -> Transcript:
+        raise STTClientError("simulated stt transport failure")
+
+
+class _RaisingHermes(HermesClient):
+    """Hermes stand-in that fails at the transport level (ТЗ §21)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, transcript: str) -> str:
+        self.calls += 1
+        raise HermesClientError("simulated hermes transport failure")
+
+
+class _MultiCallHermes(HermesClient):
+    """Hermes stand-in that serves MANY turns with the same valid payload.
+
+    ``FakeHermes`` enforces the single-call rule (one turn per instance) and
+    therefore cannot back a multi-turn load test; this one answers every
+    turn deterministically.
+    """
+
+    def __init__(self, raw: str = _VALID_HERMES_RAW) -> None:
+        self._raw = raw
+        self.calls = 0
+
+    async def complete(self, transcript: str) -> str:
+        self.calls += 1
+        self.last_transcript = transcript
+        return self._raw
+
+
+def _post_turn(app: FastAPI, pcm: bytes, device: str = "pipe-dev") -> httpx.Response:
+    async def run() -> httpx.Response:
+        async with _client(app) as client:
+            return await client.post("/api/v1/voice/turn", content=pcm,
+                                     headers=_headers(device))
+
+    return _run(asyncio.new_event_loop(), run())
+
+
+def _last_turn_dir(archive_root: Path) -> Path:
+    dirs = _find_turn_dirs(archive_root)
+    assert dirs, "no turn directory found in archive"
+    return max(dirs, key=lambda p: p.stat().st_mtime)
+
+
+def test_pipeline_success_writes_all_artifacts(tmp_path: Path) -> None:
+    """ТЗ §18/§19/§30: success path archives transcript/request/response/reply
+    and records them in metadata.json; response shape stays 200 audio/wav."""
+    stt = FakeSTT(Transcript(text="привет", language="ru"))
+    hermes = FakeHermes(
+        '{"reply": "привет", "note": {"create": false, "title": "", '
+        '"content": "", "tags": []}}')
+    app = create_app(archive_root=tmp_path / "archive", stt=stt, hermes=hermes)
+    pcm = b"\x00" * 8000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/wav"
+    turn_id = resp.headers.get("X-Turn-Id")
+    assert turn_id and uuid.UUID(turn_id)
+    assert resp.content == b""  # M2/M5/6 contract: empty body for now
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    assert turn_dir.name == turn_id
+    assert (turn_dir / "transcript.txt").read_text(encoding="utf-8") == "привет"
+    req = json.loads((turn_dir / "hermes-request.json").read_text(encoding="utf-8"))
+    assert req == {"turn_id": turn_id, "transcript": "привет"}
+    resp_doc = json.loads((turn_dir / "hermes-response.json").read_text(encoding="utf-8"))
+    assert resp_doc["reply"] == "привет"
+    assert resp_doc["note_create"] is False
+    assert json.loads(resp_doc["raw"])["reply"] == "привет"
+    assert (turn_dir / "reply.txt").read_text(encoding="utf-8") == "привет"
+
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "success"
+    assert meta["transcript"] == "привет"
+    assert meta["reply"] == "привет"
+    assert meta["turn_id"] == turn_id
+
+
+def test_pipeline_hermes_called_exactly_once(tmp_path: Path) -> None:
+    """ТЗ §24: one call + one repair — the client is invoked exactly once."""
+    hermes = FakeHermes('{"reply": "один раз", "note": {"create": false}}')
+    app = create_app(
+        archive_root=tmp_path / "archive",
+        stt=FakeSTT(Transcript(text="раз", language="ru")),
+        hermes=hermes)
+
+    resp = _post_turn(app, b"\x00" * 4000)
+
+    assert resp.status_code == 200
+    assert hermes.calls == 1
+
+
+def test_pipeline_stt_failure(tmp_path: Path) -> None:
+    """STTClientError → 502 JSON + metadata status stt_failed (ТЗ §32)."""
+    app = create_app(
+        archive_root=tmp_path / "archive",
+        stt=_RaisingSTT(),
+        hermes=FakeHermes(_VALID_HERMES_RAW))
+    pcm = b"\x00" * 4000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 502
+    assert resp.headers["content-type"].startswith("application/json")
+    body = resp.json()
+    assert body["error"] == "stt_failed"
+    assert uuid.UUID(body["turn_id"])
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "stt_failed"
+    assert meta["error"]
+    assert meta["turn_id"] == body["turn_id"]
+    # Hermes stage never ran.
+    assert not (turn_dir / "hermes-request.json").exists()
+
+
+def test_pipeline_hermes_transport_failure(tmp_path: Path) -> None:
+    """HermesClientError → 502 + hermes_failed + fallback artifacts (ТЗ §32)."""
+    hermes = _RaisingHermes()
+    app = create_app(
+        archive_root=tmp_path / "archive",
+        stt=FakeSTT(Transcript(text="запрос", language="ru")),
+        hermes=hermes)
+    pcm = b"\x00" * 4000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["error"] == "hermes_failed"
+    assert uuid.UUID(body["turn_id"])
+    assert hermes.calls == 1  # no retry of the transport call
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "hermes_failed"
+    assert meta["error"]
+    # Fallback artifacts are archived even on a transport failure.
+    assert (turn_dir / "reply.txt").read_text(encoding="utf-8") == FALLBACK_REPLY
+    resp_doc = json.loads(
+        (turn_dir / "hermes-response.json").read_text(encoding="utf-8"))
+    assert resp_doc["raw"] is None
+    assert resp_doc["fallback"] == FALLBACK_REPLY
+
+
+def test_pipeline_hermes_invalid_response(tmp_path: Path) -> None:
+    """Unrepairable payload → 502 + hermes_invalid_response, ORIGINAL raw
+    archived (the single repair pass already happened inside the parser)."""
+    hermes = FakeHermes("not json at all")
+    app = create_app(
+        archive_root=tmp_path / "archive",
+        stt=FakeSTT(Transcript(text="вопрос", language="ru")),
+        hermes=hermes)
+    pcm = b"\x00" * 4000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["error"] == "hermes_invalid_response"
+    assert uuid.UUID(body["turn_id"])
+    assert hermes.calls == 1  # repair happened in the parser, not via a 2nd call
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "hermes_invalid_response"
+    assert meta["error"]
+    assert (turn_dir / "reply.txt").read_text(encoding="utf-8") == FALLBACK_REPLY
+    resp_doc = json.loads(
+        (turn_dir / "hermes-response.json").read_text(encoding="utf-8"))
+    assert resp_doc["raw"] == "not json at all"
+    assert resp_doc["fallback"] == FALLBACK_REPLY
+
+
+def test_pipeline_empty_transcript(tmp_path: Path) -> None:
+    """Deterministic guard: empty transcript → hermes_failed, Hermes not
+    called at all (it would have nothing to answer)."""
+    hermes = FakeHermes(_VALID_HERMES_RAW)
+    app = create_app(
+        archive_root=tmp_path / "archive",
+        stt=FakeSTT(Transcript(text="   ", language="ru")),
+        hermes=hermes)
+    pcm = b"\x00" * 4000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["error"] == "hermes_failed"
+    assert uuid.UUID(body["turn_id"])
+    assert hermes.calls == 0  # the guard fires before the single call
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "hermes_failed"
+    assert meta["error"] == "empty transcript"
+    # transcript.txt is still archived (it was produced by STT).
+    assert (turn_dir / "transcript.txt").read_text(encoding="utf-8") == "   "
+    assert not (turn_dir / "hermes-request.json").exists()
+
+
+def test_pipeline_providers_unconfigured(tmp_path: Path) -> None:
+    """App built without STT/Hermes still preserves the M2 ingest-only
+    contract (this card's task body): a plain audio turn succeeds with
+    200 + X-Turn-Id and no audio body, no STT/Hermes/TTS involved. The
+    STT-pipeline milestone injects real providers later via
+    ``create_app(stt=..., hermes=...)``; until then every turn must not
+    502 just because those providers are absent."""
+    app = create_app(archive_root=tmp_path / "archive")
+    pcm = b"\x00" * 8000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 200
+    turn_id = resp.headers.get("X-Turn-Id")
+    assert turn_id and uuid.UUID(turn_id)
+    assert resp.headers["content-type"] == "audio/wav"
+    assert resp.content == b""
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    assert (turn_dir / "input.wav").exists()
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "success"
+    assert meta["turn_id"] == turn_id
+    # No STT/Hermes artifacts — this milestone's contract is ingest-only.
+    assert not (turn_dir / "transcript.txt").exists()
+    assert not (turn_dir / "hermes-request.json").exists()
+
+
+def test_production_app_default_wiring_succeeds(tmp_path: Path, monkeypatch) -> None:
+    """Regression test for the module-level production singleton.
+
+    ``app.py:app = create_app()`` (the only instance the Dockerfile's
+    ``uvicorn backend.src.voice_gateway.app:app`` serves) is built with NO
+    injected STT/Hermes. This exercises exactly that production wiring path
+    — no fakes injected anywhere — and asserts it still answers 200 +
+    X-Turn-Id for a plain audio turn, per this card's acceptance criteria.
+    """
+    monkeypatch.setenv("ARCHIVE_ROOT", str(tmp_path / "archive"))
+    app = create_app()  # mirrors the production `app = create_app()` call
+    pcm = b"\x00" * 4000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 200
+    turn_id = resp.headers.get("X-Turn-Id")
+    assert turn_id and uuid.UUID(turn_id)
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "success"

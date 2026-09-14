@@ -18,23 +18,38 @@ from __future__ import annotations
 import asyncio
 import os
 import struct
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response
-
-from backend.src.voice_gateway.archive import ArchiveStore
-from backend.src.voice_gateway.metrics import init_metrics
-from backend.common.error_codes import ErrorCode
+from fastapi.responses import JSONResponse, Response
 from prometheus_client import generate_latest
+
+from backend.common.error_codes import ErrorCode
+from backend.src.voice_gateway.archive import (
+    ArchiveStore,
+    atomic_write_bytes,
+    atomic_write_json,
+)
+from backend.src.voice_gateway.hermes.base import HermesClient
+from backend.src.voice_gateway.hermes.stage import (
+    HermesStage,
+    HermesStageError,
+    last_raw_response,
+)
+from backend.src.voice_gateway.metrics import init_metrics
+from backend.src.voice_gateway.stt.base import STTProvider
 
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
 DEFAULT_DEVICE_ID = "atom-echo-01"
 _STREAM_CHUNK = 1024 * 1024
+
+#: ТЗ §24: safe fallback reply spoken/archived when the Hermes stage fails.
+FALLBACK_REPLY = "Не удалось обработать ответ."
 
 
 def _ms(total_seconds: float) -> int:
@@ -65,13 +80,23 @@ def pcm_to_wav(pcm_path: Path, wav_path: Path, sample_rate: int, channels: int) 
             dst.write(chunk)
 
 
-def create_app(archive_root: str | os.PathLike | None = None) -> FastAPI:
-    """Build the gateway app. ``archive_root`` defaults to ``$ARCHIVE_ROOT``
-    or ``./archive`` (tests pass a tmp dir)."""
+def create_app(
+    archive_root: str | os.PathLike | None = None,
+    stt: STTProvider | None = None,
+    hermes: HermesClient | None = None,
+) -> FastAPI:
+    """Build the gateway app.
+
+    ``archive_root`` defaults to ``$ARCHIVE_ROOT`` or ``./archive`` (tests
+    pass a tmp dir). ``stt`` / ``hermes`` are optional provider
+    dependencies injected by the caller (tests pass fakes explicitly). When
+    left ``None`` the app still boots and a plain audio turn still succeeds
+    with 200 + X-Turn-Id — this milestone's ingest-only contract ("backend
+    может ответить простым 200 OK без аудио-тела [без STT/Hermes/TTS]") is
+    preserved until a later milestone wires the STT→Hermes pipeline in.
+    """
     root = Path(os.environ.get("ARCHIVE_ROOT", "archive")) if archive_root is None \
         else Path(archive_root)
-
-    app = FastAPI(title="Hermes Voice Gateway", version="0.2.0")
 
     # One metric namespace per app instance (ТЗ §34) so tests can use
     # isolated registries and concurrent apps never share counters.
@@ -80,6 +105,14 @@ def create_app(archive_root: str | os.PathLike | None = None) -> FastAPI:
     # All archive access goes through the one ArchiveStore (M2-05): it owns
     # the turn-directory layout (ТЗ §18) and the atomic metadata.json write.
     store = ArchiveStore(root)
+
+    # Hermes stage: the single-call policy (ТЗ §21–24) lives here. The
+    # endpoint wraps the injected client once, per app instance; concurrent
+    # turns share the stage safely because the raw payload travels through
+    # a task-local ContextVar, not an instance attribute.
+    hermes_stage = HermesStage(hermes) if hermes is not None else None
+
+    app = FastAPI(title="Hermes Voice Gateway", version="0.2.0")
 
     @app.get("/health")
     async def health() -> dict:
@@ -122,7 +155,8 @@ def create_app(archive_root: str | os.PathLike | None = None) -> FastAPI:
 
         def save_status(status: str, error: str | None = None,
                         input_bytes: int | None = None,
-                        audio_duration_ms: int | None = None) -> None:
+                        audio_duration_ms: int | None = None,
+                        extra: dict | None = None) -> None:
             payload: dict = {
                 "turn_id": turn_id,
                 "device_id": device_id,
@@ -135,6 +169,8 @@ def create_app(archive_root: str | os.PathLike | None = None) -> FastAPI:
                 payload["error"] = error
             if audio_duration_ms is not None:
                 payload["audio_duration_ms"] = audio_duration_ms
+            if extra:
+                payload.update(extra)
             store.save_metadata(turn_id, payload)
 
         try:
@@ -160,7 +196,94 @@ def create_app(archive_root: str | os.PathLike | None = None) -> FastAPI:
         input_bytes = pcm_path.stat().st_size
         bytes_per_second = sample_rate * channels * 2
         audio_duration_ms = input_bytes * 1000 // bytes_per_second if bytes_per_second else None
-        save_status("success", None, input_bytes, audio_duration_ms)
+
+        # ------------------------------------------------------------------
+        # STT → Hermes pipeline (ТЗ §20–§24). Runs immediately after WAV
+        # finalization, before the success metadata is persisted — but only
+        # when the pipeline is actually wired in (``stt``/``hermes`` were
+        # injected). This milestone (M2) only guarantees ingest + archive;
+        # the STT/Hermes integration is a separate milestone/card, and its
+        # own spec requires that until it lands, THIS milestone's plain
+        # 200-OK success contract must be preserved unmodified.
+        # ------------------------------------------------------------------
+        def fail_turn(status: str, error: str,
+                      input_bytes_: int | None = None,
+                      audio_duration_ms_: int | None = None,
+                      extra: dict | None = None) -> JSONResponse:
+            """Persist the terminal failure and answer 502 JSON (ТЗ §13/§32)."""
+            save_status(status, error, input_bytes_, audio_duration_ms_, extra=extra)
+            metrics.turns_total.labels(status=status).inc()
+            return JSONResponse(
+                status_code=502,
+                content={"error": status, "turn_id": turn_id},
+                media_type="application/json",
+            )
+
+        if stt is None or hermes_stage is None:
+            # STT/Hermes are not wired in for this app instance (this is the
+            # default for the M2 milestone's production singleton, ТЗ:
+            # "backend может ответить простым 200 OK без аудио-тела [без
+            # STT/Hermes/TTS]"). Finalize the turn as a plain ingest
+            # success — no STT/Hermes call, no fallback machinery.
+            save_status("success", None, input_bytes, audio_duration_ms)
+            metrics.turns_total.labels(status="success").inc()
+            return Response(status_code=200, media_type="audio/wav",
+                            headers={"X-Turn-Id": turn_id})
+
+        # --- STT (sync contract: call directly, no thread pool) -----------
+        stt_start = time.perf_counter()
+        metrics.active_turns.inc()
+        try:
+            transcript = stt.transcribe(wav_path)
+        except Exception as exc:  # STTClientError + any unexpected STT break
+            metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
+            metrics.active_turns.dec()
+            return fail_turn(ErrorCode.STT_FAILED.value, str(exc),
+                             input_bytes, audio_duration_ms)
+        metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
+        metrics.active_turns.dec()
+
+        # --- Archive the transcript (ТЗ §18/§19) -------------------------
+        atomic_write_bytes(turn_dir / "transcript.txt",
+                           transcript.text.encode("utf-8"))
+
+        # Deterministic empty-transcript guard: Hermes has nothing to answer.
+        if transcript.text.strip() == "":
+            return fail_turn(ErrorCode.HERMES_FAILED.value, "empty transcript",
+                             input_bytes, audio_duration_ms,
+                             extra={"transcript": transcript.text})
+
+        # --- Single Hermes call (ТЗ §21–§24) -----------------------------
+        atomic_write_json(turn_dir / "hermes-request.json",
+                          {"turn_id": turn_id, "transcript": transcript.text})
+
+        hermes_start = time.perf_counter()
+        metrics.active_turns.inc()
+        try:
+            response = await hermes_stage.run(transcript.text)
+        except HermesStageError as e:
+            raw = e.raw  # ORIGINAL text, or None on a transport-level failure
+            atomic_write_json(turn_dir / "hermes-response.json",
+                              {"raw": raw, "fallback": FALLBACK_REPLY})
+            atomic_write_bytes(turn_dir / "reply.txt",
+                               FALLBACK_REPLY.encode("utf-8"))
+            return fail_turn(e.status, e.error, input_bytes, audio_duration_ms,
+                             extra={"transcript": transcript.text})
+        finally:
+            metrics.hermes_duration.observe(max(0.0, time.perf_counter() - hermes_start))
+            metrics.active_turns.dec()
+
+        # --- Success (ТЗ §19/§30): archive reply + note flag. The M2
+        # response shape is preserved so the TTS child card can swap the
+        # body for real audio later.
+        raw = last_raw_response.get()
+        atomic_write_json(turn_dir / "hermes-response.json",
+                          {"raw": raw, "reply": response.reply,
+                           "note_create": response.note.create})
+        atomic_write_bytes(turn_dir / "reply.txt", response.reply.encode("utf-8"))
+        save_status("success", None, input_bytes, audio_duration_ms,
+                    extra={"transcript": transcript.text, "reply": response.reply})
+        metrics.turns_total.labels(status="success").inc()
 
         # ТЗ §12: 200 OK + X-Turn-Id. The WAV *body* arrives in Milestone 6;
         # this milestone answers plain 200 with no audio body (task spec).

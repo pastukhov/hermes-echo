@@ -15,8 +15,14 @@ directory (ТЗ section 18::
 ). This package owns the ``metadata.json`` half of that layout: the store
 computes the turn directory and writes the metadata atomically. Sibling
 components (audio staging, note persistence) live elsewhere; the pipeline
-talks to the archive through :class:`ArchiveStore` so the atomic-write
-guarantee is applied in exactly one place.
+talks to the archive through :class:`MetadataArchiveStore` so the
+atomic-write guarantee is applied in exactly one place.
+
+The package also re-exports the :class:`ArchiveStore` ABSTRACTION (ТЗ
+section 16) — the contract a turn's audio archive must satisfy — and its
+supporting types (:class:`AudioFormat`, :class:`ArchiveError`). The
+filesystem implementation of that abstraction arrives with card
+t_eb697c7e in :mod:`voice_gateway.archive.filesystem`.
 """
 from __future__ import annotations
 
@@ -30,10 +36,17 @@ from backend.src.voice_gateway.archive.atomic import (
     atomic_write_json,
     atomic_write_metadata,
 )
+from backend.src.voice_gateway.archive.base import (
+    ArchiveError,
+    ArchiveStore,
+    AudioFormat,
+    INPUT_WAV_FILENAME,
+    RAW_PCM_FILENAME,
+)
 from backend.src.voice_gateway.archive.metadata import TurnMetadata
 
 
-class ArchiveStore:
+class MetadataArchiveStore:
     """Filesystem layout for voice-turn archives.
 
     ``root`` is the archive root (default ``archive/`` next to the repo
@@ -67,8 +80,13 @@ class ArchiveStore:
 
 
 __all__ = [
+    "INPUT_WAV_FILENAME",
     "METADATA_FILENAME",
+    "RAW_PCM_FILENAME",
+    "ArchiveError",
     "ArchiveStore",
+    "AudioFormat",
+    "MetadataArchiveStore",
     "TurnMetadata",
     "atomic_write_bytes",
     "atomic_write_json",

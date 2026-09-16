@@ -29,11 +29,13 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import generate_latest
 
 from backend.common.error_codes import ErrorCode
+from backend.src.voice_gateway.health import check_live, check_ready
 from backend.src.voice_gateway.archive import (
     ArchiveStore,
     atomic_write_bytes,
     atomic_write_json,
 )
+from backend.src.voice_gateway.config import STTConfig, STTConfigError
 from backend.src.voice_gateway.hermes.base import HermesClient
 from backend.src.voice_gateway.hermes.stage import (
     HermesStage,
@@ -42,6 +44,7 @@ from backend.src.voice_gateway.hermes.stage import (
 )
 from backend.src.voice_gateway.metrics import init_metrics
 from backend.src.voice_gateway.stt.base import STTProvider
+from backend.src.voice_gateway.stt.client import OpenAICompatibleSTT
 
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
@@ -54,6 +57,22 @@ FALLBACK_REPLY = "Не удалось обработать ответ."
 
 def _ms(total_seconds: float) -> int:
     return int(round(total_seconds * 1000))
+
+
+def _default_stt_provider() -> STTProvider | None:
+    """Build the production STTProvider from environment config (ТЗ §20).
+
+    Returns ``None`` when STT is not configured (``STT_BASE_URL`` unset) so
+    the caller can fall back to this milestone's ingest-only contract — the
+    same behavior as before STT was wired in. Only ever consulted when the
+    caller did not explicitly inject a provider (tests always pass one
+    explicitly, so this path only matters for the production singleton).
+    """
+    try:
+        config = STTConfig.from_env()
+    except STTConfigError:
+        return None
+    return OpenAICompatibleSTT(config)
 
 
 def pcm_to_wav(pcm_path: Path, wav_path: Path, sample_rate: int, channels: int) -> None:
@@ -90,10 +109,15 @@ def create_app(
     ``archive_root`` defaults to ``$ARCHIVE_ROOT`` or ``./archive`` (tests
     pass a tmp dir). ``stt`` / ``hermes`` are optional provider
     dependencies injected by the caller (tests pass fakes explicitly). When
-    left ``None`` the app still boots and a plain audio turn still succeeds
-    with 200 + X-Turn-Id — this milestone's ingest-only contract ("backend
-    может ответить простым 200 OK без аудио-тела [без STT/Hermes/TTS]") is
-    preserved until a later milestone wires the STT→Hermes pipeline in.
+    ``stt`` is left ``None`` the production STTProvider is built from
+    environment config (ТЗ §20, ``_default_stt_provider()``); when neither
+    an env-configured endpoint nor an injected fake is available, STT is
+    simply not run. ``hermes`` has no such env-based default (wiring it in
+    is a separate card's concern) — Hermes only runs when explicitly
+    injected. When STT is unavailable the app still boots and a plain audio
+    turn still succeeds with 200 + X-Turn-Id — this milestone's ingest-only
+    contract ("backend может ответить простым 200 OK без аудио-тела [без
+    STT/Hermes/TTS]") is preserved.
     """
     root = Path(os.environ.get("ARCHIVE_ROOT", "archive")) if archive_root is None \
         else Path(archive_root)
@@ -105,6 +129,12 @@ def create_app(
     # All archive access goes through the one ArchiveStore (M2-05): it owns
     # the turn-directory layout (ТЗ §18) and the atomic metadata.json write.
     store = ArchiveStore(root)
+
+    # STT provider: explicit injection wins; otherwise fall back to the
+    # env-configured production provider (ТЗ §20). Tests always inject a
+    # fake explicitly, so this fallback only matters for the production
+    # singleton at the bottom of this module.
+    stt_provider = stt if stt is not None else _default_stt_provider()
 
     # Hermes stage: the single-call policy (ТЗ §21–24) lives here. The
     # endpoint wraps the injected client once, per app instance; concurrent
@@ -122,6 +152,31 @@ def create_app(
             "service": "voice-gateway",
             "version": app.version,
         }
+
+    @app.get("/health/live")
+    async def health_live() -> dict:
+        """Liveness probe (ТЗ §35): process alive, nothing else."""
+        return check_live()
+
+    @app.get("/health/ready")
+    async def health_ready() -> JSONResponse:
+        """Readiness probe (ТЗ §35): config loaded + archive writable.
+
+        Readiness must not depend on the momentary availability of
+        Hermes/STT/TTS (ТЗ §35) — no network calls here, ever, so a
+        hung provider cannot create a restart loop. The notes vault is
+        probed and reported but never blocking (writable/optional, ТЗ
+        §25).
+        """
+        report = check_ready(
+            archive_root=root,
+            note_root=os.environ.get("OBSIDIAN_VAULT_PATH"),
+            env=os.environ,
+        )
+        return JSONResponse(
+            status_code=200 if report.ready else 503,
+            content=report.as_dict(),
+        )
 
     @app.get("/metrics")
     async def metrics_endpoint() -> Response:
@@ -148,7 +203,15 @@ def create_app(
 
         # ТЗ §18: archive/YYYY/MM/DD/<turn-id>/ — owned by ArchiveStore.
         # UTC date, so the partition is deterministic for a given instant.
-        turn_dir = store.turn_dir(turn_id, day=datetime.now(timezone.utc).date())
+        # Captured ONCE and threaded through every save_metadata() call
+        # below: ArchiveStore.turn_dir() defaults to the LOCAL date when no
+        # ``day`` is given, so if a turn straddles local midnight while
+        # running under a non-UTC TZ (e.g. MSK, UTC+3) the two dates
+        # diverge and metadata.json would be written into a different
+        # day-directory than input.pcm/input.wav — never happens as long as
+        # every write reuses this same UTC day.
+        turn_day = datetime.now(timezone.utc).date()
+        turn_dir = store.turn_dir(turn_id, day=turn_day)
         turn_dir.mkdir(parents=True, exist_ok=True)
         pcm_path = turn_dir / "input.pcm"
         wav_path = turn_dir / "input.wav"
@@ -171,7 +234,7 @@ def create_app(
                 payload["audio_duration_ms"] = audio_duration_ms
             if extra:
                 payload.update(extra)
-            store.save_metadata(turn_id, payload)
+            store.save_metadata(turn_id, payload, day=turn_day)
 
         try:
             with open(pcm_path, "wb") as pcm_file:
@@ -187,25 +250,10 @@ def create_app(
             save_status(ErrorCode.INTERNAL_ERROR.value, f"stream error: {exc}")
             raise
 
-        try:
-            pcm_to_wav(pcm_path, wav_path, sample_rate, channels)
-        except Exception:
-            save_status(ErrorCode.INTERNAL_ERROR.value, "wav finalization failed")
-            raise HTTPException(status_code=500, detail=str(ErrorCode.INTERNAL_ERROR))
-
-        input_bytes = pcm_path.stat().st_size
-        bytes_per_second = sample_rate * channels * 2
-        audio_duration_ms = input_bytes * 1000 // bytes_per_second if bytes_per_second else None
-
-        # ------------------------------------------------------------------
-        # STT → Hermes pipeline (ТЗ §20–§24). Runs immediately after WAV
-        # finalization, before the success metadata is persisted — but only
-        # when the pipeline is actually wired in (``stt``/``hermes`` were
-        # injected). This milestone (M2) only guarantees ingest + archive;
-        # the STT/Hermes integration is a separate milestone/card, and its
-        # own spec requires that until it lands, THIS milestone's plain
-        # 200-OK success contract must be preserved unmodified.
-        # ------------------------------------------------------------------
+        # Terminal-failure helper (ТЗ §13/§32): persist the failure metadata
+        # atomically BEFORE answering, then return the locked 502 JSON shape
+        # ``{"error": <status>, "turn_id": <id>}`` — the diagnostic text of
+        # ``metadata.error`` is never echoed to the client.
         def fail_turn(status: str, error: str,
                       input_bytes_: int | None = None,
                       audio_duration_ms_: int | None = None,
@@ -219,12 +267,49 @@ def create_app(
                 media_type="application/json",
             )
 
-        if stt is None or hermes_stage is None:
-            # STT/Hermes are not wired in for this app instance (this is the
-            # default for the M2 milestone's production singleton, ТЗ:
-            # "backend может ответить простым 200 OK без аудио-тела [без
-            # STT/Hermes/TTS]"). Finalize the turn as a plain ingest
-            # success — no STT/Hermes call, no fallback machinery.
+        input_bytes = pcm_path.stat().st_size
+
+        # ------------------------------------------------------------------
+        # ТЗ §32: deterministic validation of the raw PCM S16LE contract
+        # (ТЗ §11) BEFORE WAV finalization. Invalid audio is a *known*
+        # error — it gets its own bounded code, never degrades to
+        # internal_error (design rule: known errors must not fall back to
+        # internal_error). The client is still present (the body completed),
+        # so it gets the standard 502 JSON answer; metadata.json is saved
+        # first with all already-known turn fields.
+        # ------------------------------------------------------------------
+        if input_bytes == 0:
+            return fail_turn(ErrorCode.AUDIO_INVALID.value, "empty audio body",
+                             input_bytes, None)
+        if input_bytes % 2 != 0:
+            return fail_turn(
+                ErrorCode.AUDIO_INVALID.value,
+                f"odd byte count ({input_bytes}): not valid PCM S16LE",
+                input_bytes, None)
+
+        try:
+            pcm_to_wav(pcm_path, wav_path, sample_rate, channels)
+        except Exception:
+            save_status(ErrorCode.INTERNAL_ERROR.value, "wav finalization failed")
+            raise HTTPException(status_code=500, detail=str(ErrorCode.INTERNAL_ERROR))
+
+        bytes_per_second = sample_rate * channels * 2
+        audio_duration_ms = input_bytes * 1000 // bytes_per_second if bytes_per_second else None
+
+        # ------------------------------------------------------------------
+        # STT → Hermes pipeline (ТЗ §20–§24). Runs immediately after WAV
+        # finalization, before the success metadata is persisted — but only
+        # when the pipeline is actually wired in (``stt``/``hermes`` were
+        # injected). This milestone (M2) only guarantees ingest + archive;
+        # the STT/Hermes integration is a separate milestone/card, and its
+        # own spec requires that until it lands, THIS milestone's plain
+        # 200-OK success contract must be preserved unmodified.
+        # ------------------------------------------------------------------
+
+        if stt_provider is None:
+            # STT is not wired in for this app instance (no injected fake
+            # and no STT_BASE_URL configured). Finalize the turn as a plain
+            # ingest success — no STT/Hermes call, no fallback machinery.
             save_status("success", None, input_bytes, audio_duration_ms)
             metrics.turns_total.labels(status="success").inc()
             return Response(status_code=200, media_type="audio/wav",
@@ -234,7 +319,7 @@ def create_app(
         stt_start = time.perf_counter()
         metrics.active_turns.inc()
         try:
-            transcript = stt.transcribe(wav_path)
+            transcript = stt_provider.transcribe(wav_path)
         except Exception as exc:  # STTClientError + any unexpected STT break
             metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
             metrics.active_turns.dec()
@@ -246,6 +331,17 @@ def create_app(
         # --- Archive the transcript (ТЗ §18/§19) -------------------------
         atomic_write_bytes(turn_dir / "transcript.txt",
                            transcript.text.encode("utf-8"))
+
+        if hermes_stage is None:
+            # STT ran but Hermes is not wired in for this app instance —
+            # wiring Hermes in is a separate card's concern. The turn still
+            # succeeds; the transcript is archived in both transcript.txt
+            # and metadata.json.
+            save_status("success", None, input_bytes, audio_duration_ms,
+                        extra={"transcript": transcript.text})
+            metrics.turns_total.labels(status="success").inc()
+            return Response(status_code=200, media_type="audio/wav",
+                            headers={"X-Turn-Id": turn_id})
 
         # Deterministic empty-transcript guard: Hermes has nothing to answer.
         if transcript.text.strip() == "":

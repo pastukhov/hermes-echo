@@ -384,6 +384,38 @@ def test_pipeline_stt_failure(tmp_path: Path) -> None:
     assert not (turn_dir / "hermes-request.json").exists()
 
 
+def test_stt_failure_without_hermes_wired_stays_stt_failed(tmp_path: Path) -> None:
+    """This card's scope: an STT-only app (no Hermes injected) whose STT
+    provider raises must still fail the turn with ``stt_failed`` — never a
+    silent/misleading success, never a bare 500/internal_error. No
+    transcript.txt is created (STT never produced a transcript), and no
+    downstream (Hermes) call happens since Hermes isn't even wired in."""
+    app = create_app(archive_root=tmp_path / "archive", stt=_RaisingSTT())
+    pcm = b"\x00" * 4000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 502
+    assert resp.headers["content-type"].startswith("application/json")
+    body = resp.json()
+    assert set(body) == {"error", "turn_id"}
+    assert body["error"] == "stt_failed"
+    assert uuid.UUID(body["turn_id"])
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    assert turn_dir.name == body["turn_id"]
+    assert not (turn_dir / "transcript.txt").exists()
+    assert not (turn_dir / "hermes-request.json").exists()
+    assert not (turn_dir / "hermes-response.json").exists()
+
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "stt_failed"
+    assert meta["error"]
+    assert meta["turn_id"] == body["turn_id"]
+    # Diagnostic error must not leak into the client-facing response.
+    assert "error" not in body or body["error"] == "stt_failed"
+
+
 def test_pipeline_hermes_transport_failure(tmp_path: Path) -> None:
     """HermesClientError → 502 + hermes_failed + fallback artifacts (ТЗ §32)."""
     hermes = _RaisingHermes()
@@ -507,6 +539,7 @@ def test_production_app_default_wiring_succeeds(tmp_path: Path, monkeypatch) -> 
     X-Turn-Id for a plain audio turn, per this card's acceptance criteria.
     """
     monkeypatch.setenv("ARCHIVE_ROOT", str(tmp_path / "archive"))
+    monkeypatch.delenv("STT_BASE_URL", raising=False)
     app = create_app()  # mirrors the production `app = create_app()` call
     pcm = b"\x00" * 4000
 
@@ -519,3 +552,128 @@ def test_production_app_default_wiring_succeeds(tmp_path: Path, monkeypatch) -> 
     turn_dir = _last_turn_dir(tmp_path / "archive")
     meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
     assert meta["status"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# STT runs independently of Hermes wiring (this card: STT-pipeline
+# integration, ТЗ §20; Hermes wiring is a separate concern/card)
+# ---------------------------------------------------------------------------
+
+def test_stt_wired_without_hermes_still_transcribes(tmp_path: Path) -> None:
+    """An STTProvider injected with NO Hermes client still runs: the turn
+    succeeds, calls STT exactly once, and archives the exact transcript to
+    transcript.txt (UTF-8) and metadata.json's ``transcript`` field — no
+    Hermes artifacts are produced (Hermes wiring is out of this card's
+    scope)."""
+    stt = FakeSTT(Transcript(text="привет без гермеса", language="ru"))
+    app = create_app(archive_root=tmp_path / "archive", stt=stt)
+    pcm = b"\x00" * 4000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 200
+    turn_id = resp.headers.get("X-Turn-Id")
+    assert turn_id and uuid.UUID(turn_id)
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    assert turn_dir.name == turn_id
+    assert (turn_dir / "transcript.txt").read_text(encoding="utf-8") == \
+        "привет без гермеса"
+    assert not (turn_dir / "hermes-request.json").exists()
+    assert not (turn_dir / "hermes-response.json").exists()
+
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "success"
+    assert meta["transcript"] == "привет без гермеса"
+    assert meta["turn_id"] == turn_id
+
+
+class _ValidatingSTT(STTProvider):
+    """STT stand-in that PROVES the WAV it receives is already finalized.
+
+    Opens the given path with the stdlib ``wave`` reader (which raises on
+    a truncated/incomplete RIFF file) and records how many times and with
+    what path it was called - the concrete proof that finalize-before-
+    transcribe ordering (this card's contract) actually holds, not just
+    that a WAV file happens to exist somewhere by the time the response
+    is returned."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.calls = 0
+        self.seen_paths: list[Path] = []
+
+    def transcribe(self, wav: Path) -> Transcript:
+        self.calls += 1
+        self.seen_paths.append(wav)
+        import wave
+        with wave.open(str(wav), "rb") as w:
+            # A partially written / still-open-for-write WAV would not
+            # parse as valid RIFF/WAVE; a successful open here is the
+            # proof that pcm_to_wav() already completed and closed the
+            # file before this call happened.
+            w.getnframes()
+        return Transcript(text=self._text, language="ru")
+
+
+def test_stt_called_once_after_wav_finalized_with_exact_utf8_transcript(
+    tmp_path: Path,
+) -> None:
+    """Vertical tracer for this card's core contract (TZ section 20 wiring):
+
+    1. STTProvider.transcribe() is called exactly once per turn;
+    2. it is called with a path to an already-closed, valid WAV file
+       (finalize-before-transcribe ordering - never a half-written PCM);
+    3. the exact (Unicode/Cyrillic) Transcript.text it returns lands
+       byte-for-byte, UTF-8, in both transcript.txt and metadata.json's
+       ``transcript`` field."""
+    stt = _ValidatingSTT("привет, это тестовая расшифровка")
+    app = create_app(archive_root=tmp_path / "archive", stt=stt)
+    pcm = b"\x00" * 4000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 200
+    turn_id = resp.headers.get("X-Turn-Id")
+    assert turn_id and uuid.UUID(turn_id)
+
+    # Exactly one STT call, against the turn's own finalized input.wav.
+    assert stt.calls == 1
+    assert stt.seen_paths == [_last_turn_dir(tmp_path / "archive") / "input.wav"]
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    assert turn_dir.name == turn_id
+    assert (turn_dir / "input.wav").exists()
+    assert (turn_dir / "transcript.txt").read_text(encoding="utf-8") == \
+        "привет, это тестовая расшифровка"
+
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "success"
+    assert meta["transcript"] == "привет, это тестовая расшифровка"
+    assert meta["turn_id"] == turn_id
+
+
+def test_create_app_wires_default_stt_provider_when_not_injected(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``create_app()`` with no ``stt=`` argument falls back to the module's
+    ``_default_stt_provider()`` (built from ``STT_BASE_URL`` etc, ТЗ §20) —
+    the production singleton ``app = create_app()`` must automatically pick
+    up a configured STT endpoint without any caller wiring it in by hand."""
+    from backend.src.voice_gateway import app as app_module
+
+    sentinel_stt = FakeSTT(Transcript(text="из окружения", language="ru"))
+    monkeypatch.setattr(app_module, "_default_stt_provider", lambda: sentinel_stt)
+
+    app = app_module.create_app(archive_root=tmp_path / "archive")
+    pcm = b"\x00" * 4000
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 200
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    assert (turn_dir / "transcript.txt").read_text(encoding="utf-8") == \
+        "из окружения"
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "success"
+    assert meta["transcript"] == "из окружения"

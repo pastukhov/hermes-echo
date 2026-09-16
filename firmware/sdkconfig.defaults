@@ -1,0 +1,8 @@
+# ESP-IDF sdkconfig defaults for the ATOM Echo target build (env:esp32dev).
+# Not verified against a real build yet (esp32dev is not gated by the
+# firmware/ consolidation plan) - revisit once board_atom_echo.c compiles.
+
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

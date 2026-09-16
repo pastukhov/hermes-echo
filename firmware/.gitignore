@@ -1,0 +1,5 @@
+.pio/
+.pio-core/
+.vscode/
+.venv/
+sdkconfig.esp32dev

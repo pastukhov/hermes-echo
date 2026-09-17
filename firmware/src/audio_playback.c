@@ -9,6 +9,7 @@
  */
 
 #include "audio_playback.h"
+#include "board_atom_echo.h"
 #include "driver/i2s_common.h"
 #include "driver/i2s_std.h"
 #include "freertos/FreeRTOS.h"
@@ -26,12 +27,16 @@
 #define DEFAULT_BUFFER_FRAME_SIZE 512
 #define DEFAULT_QUEUE_SIZE        8
 
-/* I2S configuration - ATOM Echo board pin mapping
- * (authoritative source: project board_atom_echo.h) */
-#define I2S_PORT                  I2S_NUM_0
-#define I2S_BCLK_PIN              GPIO_NUM_15  /* ATOM Echo I2S BCLK (serial clock) */
-#define I2S_WS_PIN                GPIO_NUM_13  /* ATOM Echo I2S WS/LRC (word select) */
-#define I2S_DOUT_PIN              GPIO_NUM_22  /* ATOM Echo I2S DOUT (data out) */
+/* I2S configuration - ATOM Echo board pin mapping. Pins live in
+ * board_atom_echo.h (the single board-specific module, per ТЗ §5: "Никакие
+ * hardware GPIO не должны быть разбросаны по business logic") -- this file
+ * previously hardcoded its own (incorrect) BCLK/WS values instead of
+ * actually including that header; fixed 2026-09-17, see board_atom_echo.h
+ * for sourcing. */
+#define I2S_PORT                  BOARD_I2S_PORT
+#define I2S_BCLK_PIN              BOARD_I2S_BCLK_PIN
+#define I2S_WS_PIN                BOARD_I2S_WS_PIN
+#define I2S_DOUT_PIN              BOARD_I2S_DOUT_PIN
 
 /* Frame size in bytes (S16LE = 2 bytes per sample per channel) */
 #define FRAME_SIZE(ch, bits)      (((bits) / 8) * (ch))

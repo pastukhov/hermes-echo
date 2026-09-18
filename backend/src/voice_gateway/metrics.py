@@ -10,10 +10,12 @@ The MVP exposes the minimal metric set from ТЗ §34 on ``GET /metrics``:
     voice_tts_duration_seconds
     voice_notes_total{status}
     voice_active_turns
+    request_latency_seconds{endpoint,status}
 
 Label discipline (ТЗ §34): never put transcript, title, turn_id, error
-messages or arbitrary text in labels — the only label is the bounded
-``status`` enum (``success`` / stable ``ErrorCode`` values).
+messages or arbitrary text in labels — only bounded enums: the ``status``
+enum (``success`` / stable ``ErrorCode`` values) and the ``endpoint`` route
+name (a fixed set of registered routes) in ``request_latency_seconds``.
 
 Every metric set is created per app instance (``init_metrics``) so tests can
 use isolated registries and concurrent app instances never share counters.
@@ -79,6 +81,13 @@ class VoiceMetrics:
         self.tts_duration = Histogram(
             "voice_tts_duration_seconds",
             "TTS stage duration.",
+            registry=registry,
+            buckets=_BUCKETS,
+        )
+        self.request_latency = Histogram(
+            "request_latency_seconds",
+            "Per-request processing duration.",
+            ("endpoint", "status"),
             registry=registry,
             buckets=_BUCKETS,
         )

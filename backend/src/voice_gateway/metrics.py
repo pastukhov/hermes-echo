@@ -10,6 +10,7 @@ The MVP exposes the minimal metric set from ТЗ §34 on ``GET /metrics``:
     voice_tts_duration_seconds
     voice_notes_total{status}
     voice_active_turns
+    request_count{client_id, route, status}
 
 Label discipline (ТЗ §34): never put transcript, title, turn_id, error
 messages or arbitrary text in labels — the only label is the bounded
@@ -50,6 +51,18 @@ class VoiceMetrics:
             "voice_notes_total",
             "Notes written to the note storage by terminal status.",
             ("status",),
+            registry=registry,
+        )
+        # REQUEST_COUNT: middleware counter, incremented once per request by
+        # the request middleware (ТЗ §34). Labels are deliberately low-cardinality:
+        # ``client_id`` (bounded device identifier), ``route`` (a fixed set of
+        # endpoint paths), and ``status`` (``success`` / stable ``ErrorCode``
+        # values). Label discipline (ТЗ §34) still applies — no arbitrary text
+        # in any of the three labels.
+        self.request_count = Counter(
+            "request_count",
+            "Total number of requests per client_id, route, and status.",
+            ("client_id", "route", "status"),
             registry=registry,
         )
         self.turn_duration = Histogram(

@@ -166,3 +166,84 @@ bool hw_report_error(const char* what) {
     ESP_LOGE(TAG, "hardware error: %s", what ? what : "(null)");
     return false;
 }
+
+/* --- Audio capture (M1-03) and playback (M1-04) --------------------- */
+
+#include "audio_capture.h"
+#include "audio_playback.h"
+
+static bool s_capture_initialized = false;
+static bool s_playback_initialized = false;
+
+void hw_audio_capture_start(void) {
+    if (!s_capture_initialized) {
+        if (audio_capture_init(NULL) != ESP_OK) {
+            ESP_LOGE(TAG, "hw_audio_capture_start: init failed");
+            return;
+        }
+        s_capture_initialized = true;
+    }
+    if (audio_capture_start() != ESP_OK) {
+        ESP_LOGE(TAG, "hw_audio_capture_start: start failed");
+    }
+}
+
+void hw_audio_capture_stop(void) {
+    if (!s_capture_initialized) {
+        return;
+    }
+    audio_capture_stop();
+}
+
+size_t hw_audio_capture_read(uint8_t* buf, size_t max_len) {
+    if (!s_capture_initialized) {
+        return 0;
+    }
+    /* Non-blocking poll: this is called once per app tick, so a zero
+     * timeout keeps the state machine from ever stalling on the DMA
+     * queue -- an empty read this tick just means "nothing yet". */
+    return audio_capture_read(buf, max_len, 0);
+}
+
+void hw_audio_playback_start(void) {
+    if (!s_playback_initialized) {
+        if (audio_playback_init(NULL) != ESP_OK) {
+            ESP_LOGE(TAG, "hw_audio_playback_start: init failed");
+            return;
+        }
+        s_playback_initialized = true;
+    }
+    if (audio_playback_start() != ESP_OK) {
+        ESP_LOGE(TAG, "hw_audio_playback_start: start failed");
+    }
+}
+
+void hw_audio_playback_stop(void) {
+    if (!s_playback_initialized) {
+        return;
+    }
+    audio_playback_stop();
+}
+
+size_t hw_audio_playback_write(const uint8_t* data, size_t len) {
+    if (!s_playback_initialized) {
+        return 0;
+    }
+    /* Short timeout: one app tick's worth of patience. A partial/failed
+     * write (buffer momentarily full) just means the caller retries the
+     * remainder next tick -- it must never block the state machine. */
+    if (audio_playback_write(data, len, 0) != ESP_OK) {
+        return 0;
+    }
+    return len;
+}
+
+bool hw_audio_playback_drained(void) {
+    if (!s_playback_initialized) {
+        return true;
+    }
+    /* The I2S channel API doesn't expose "DMA queue is empty" directly;
+     * a zero buffer level is the closest proxy available (see
+     * audio_playback_get_buffer_level()'s own caveat comment). */
+    return audio_playback_get_buffer_level() == 0;
+}

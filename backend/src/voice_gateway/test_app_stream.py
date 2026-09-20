@@ -58,7 +58,7 @@ def _run(loop: asyncio.AbstractEventLoop, coro):
 def _find_turn_dirs(archive_root: Path) -> list[Path]:
     import os
     return [Path(p) for p, _d, files in os.walk(archive_root)
-            if "input.pcm" in files]
+            if "metadata.json" in files]
 
 
 def _wait_for_turn_dir(archive_root: Path, timeout: float = 5.0) -> Path:
@@ -160,8 +160,7 @@ def test_turn_success(tmp_path: Path) -> None:
     day = datetime.now(timezone.utc).date()
     turn_dir = tmp_path / "archive" / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}" / turn_id
     assert turn_dir.is_dir()
-    assert (turn_dir / "input.pcm").exists()
-    assert (turn_dir / "input.pcm").read_bytes() == pcm
+    assert not (turn_dir / "input.pcm").exists()
     assert (turn_dir / "input.wav").exists()
 
     meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
@@ -203,8 +202,9 @@ def test_turn_fragmented_stream_finalizes_valid_wav(tmp_path: Path) -> None:
     turn_dir = tmp_path / "archive" / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}" / turn_id
     assert turn_dir.is_dir(), "turn dir missing under YYYY/MM/DD partition"
 
-    # The reassembled PCM must be byte-identical to what was sent.
-    assert (turn_dir / "input.pcm").read_bytes() == pcm
+    # The reassembled PCM is now consumed and deleted after a successful
+    # finalize; the WAV-frame comparison below already covers correctness.
+    assert not (turn_dir / "input.pcm").exists()
 
     # input.wav must be a *valid* WAV per the stdlib parser.
     import wave
@@ -268,6 +268,51 @@ def test_turn_invalid_sample_rate_falls_back(tmp_path: Path) -> None:
     # Non-numeric headers fall back to defaults (16000/1) rather than 4xx.
     assert resp.status_code == 200
     assert resp.headers.get("X-Turn-Id")
+
+
+def test_turn_odd_byte_body_audio_invalid_metadata(tmp_path: Path) -> None:
+    """Odd-byte PCM is a KNOWN error (ТЗ §13/§32): metadata.json is saved
+    atomically with status=audio_invalid + sanitized error BEFORE the 502 is
+    answered, and the response carries only the bounded code + turn_id —
+    never the diagnostic text."""
+    app = _make_app(tmp_path)
+    pcm = b"\x00" * 3  # odd byte count: not valid PCM S16LE
+
+    resp = _post_turn(app, pcm)
+
+    assert resp.status_code == 502
+    body = resp.json()
+    assert set(body) == {"error", "turn_id"}
+    assert body["error"] == "audio_invalid"
+    uuid.UUID(body["turn_id"])
+
+    turn_dir = _last_turn_dir(tmp_path / "archive")
+    assert turn_dir.name == body["turn_id"]
+    meta = json.loads((turn_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "audio_invalid"
+    assert meta["error"]  # diagnostic text lives in metadata only
+    assert meta["turn_id"] == body["turn_id"]
+    assert meta["input_bytes"] == 3
+    assert not (turn_dir / "input.wav").exists()  # finalized only after validation
+
+
+def test_turn_empty_body_audio_invalid_metadata(tmp_path: Path) -> None:
+    """Empty body → audio_invalid with the same guarantees (ТЗ §13/§32)."""
+    app = _make_app(tmp_path)
+
+    resp = _post_turn(app, b"")
+
+    assert resp.status_code == 502
+    body = resp.json()
+    assert set(body) == {"error", "turn_id"}
+    assert body["error"] == "audio_invalid"
+
+    meta = json.loads(
+        (_last_turn_dir(tmp_path / "archive") / "metadata.json")
+        .read_text(encoding="utf-8"))
+    assert meta["status"] == "audio_invalid"
+    assert meta["error"] == "empty audio body"
+    assert meta["turn_id"] == body["turn_id"]
 
 
 def test_health_after_many_turns(tmp_path: Path) -> None:

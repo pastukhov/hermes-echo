@@ -22,6 +22,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Awaitable, Callable
 
 import anyio
 from fastapi import FastAPI, HTTPException, Request
@@ -143,6 +144,40 @@ def create_app(
     hermes_stage = HermesStage(hermes) if hermes is not None else None
 
     app = FastAPI(title="Hermes Voice Gateway", version="0.2.0")
+
+    @app.middleware("http")
+    async def track_request_metrics(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        """Record the four request-level metrics for every request (ТЗ §34).
+
+        Wraps ``call_next`` in try/finally so ``active_requests`` is always
+        decremented, even when the endpoint raises. The route label is the
+        matched path *template* (``request.scope["route"].path``, a fixed
+        finite set) — never the raw URL path, which would be unbounded
+        cardinality (see metrics.py's label-discipline note). Unmatched
+        paths (404s, no route resolved) use the literal "unmatched" label
+        instead. The ``/metrics`` scrape endpoint itself passes through this
+        same middleware like any other request — it is not special-cased.
+        """
+        metrics.active_requests.inc()
+        start = time.perf_counter()
+        status = "500"
+        try:
+            response = await call_next(request)
+            status = str(response.status_code)
+            return response
+        finally:
+            matched_route = request.scope.get("route")
+            route = matched_route.path if matched_route is not None else "unmatched"
+            client_id = request.headers.get("X-Device-Id", "unknown")
+            elapsed = time.perf_counter() - start
+            metrics.active_requests.dec()
+            metrics.request_latency.labels(endpoint=route, status=status).observe(elapsed)
+            metrics.request_count.labels(
+                client_id=client_id, route=route, status=status
+            ).inc()
+            metrics.request_count_by_route.labels(route=route).inc()
 
     @app.get("/health")
     async def health() -> dict:

@@ -11,6 +11,14 @@ Environment variables (secrets stay out of the repo — ТЗ section 51):
     STT_API_KEY       optional; sent as ``Authorization: *** when set
     STT_MODEL         model name
     STT_TIMEOUT       seconds; recommended default 60 (ТЗ section 31)
+
+    VOICE_API_KEY     optional; required for API-key auth to be effective
+    VOICE_AUTH_ENABLED  optional; "true"/"false" — force auth on/off. When
+                        unset, auth is enabled only if VOICE_API_KEY is set.
+    VOICE_RATE_LIMIT  optional, int; max requests per client per window
+                        (default 100)
+    VOICE_RATE_PERIOD  optional, int; the rate window in seconds
+                        (default 60)
 """
 from __future__ import annotations
 
@@ -38,6 +46,34 @@ class HermesConfigError(ValueError):
 
 class STTConfigError(ValueError):
     """Invalid STT configuration (missing or malformed environment values)."""
+
+
+class SecurityConfigError(ValueError):
+    """Invalid security configuration (malformed VOICE_* environment values)."""
+
+
+#: Defaults for per-client / per-route rate limiting (ТЗ security).
+DEFAULT_RATE_LIMIT = 100
+DEFAULT_RATE_PERIOD = 60
+
+
+def _parse_rate_value(raw: str | None, name: str, default: int) -> int:
+    """Parse a positive integer rate-limiting value, falling back to a default.
+
+    ``raw`` is the raw environment string (or ``None``/empty to use the
+    default). Raises :class:`SecurityConfigError` when the value is present
+    but not a positive integer.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return default
+    try:
+        value = int(text)
+    except (TypeError, ValueError) as exc:
+        raise SecurityConfigError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise SecurityConfigError(f"{name} must be a positive integer")
+    return value
 
 
 @dataclass(frozen=True)
@@ -109,6 +145,75 @@ class STTConfig:
         if timeout <= 0:
             raise STTConfigError("STT_TIMEOUT must be positive")
         return cls(base_url=base_url, model=model, api_key=api_key, timeout=timeout)
+
+
+@dataclass(frozen=True)
+class SecurityConfig:
+    """Immutable gateway security settings: device-token auth + rate limits.
+
+    Auth fields mirror the device-token contract of ТЗ section 40 (sibling
+    auth card t_ed297906): ``auth_enabled`` defaults to ``True`` on direct
+    construction — building a :class:`SecurityConfig` by hand means "I want
+    auth". The env-based factory decides the default from ``VOICE_API_KEY``
+    / ``VOICE_AUTH_ENABLED`` instead (see :meth:`from_env`).
+
+    Rate-limiting fields (task t_89295105): one sliding window per client
+    AND one per route, both bounded by ``rate_limit`` requests per
+    ``rate_period`` seconds.
+    """
+
+    api_key: str
+    auth_enabled: bool = True
+    rate_limit: int = DEFAULT_RATE_LIMIT
+    rate_period: int = DEFAULT_RATE_PERIOD
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "SecurityConfig":
+        """Build config from environment variables.
+
+        Auth rules (ТЗ section 40, docs/protocol.md):
+
+        * ``VOICE_AUTH_ENABLED`` unset → auth is enabled iff
+          ``VOICE_API_KEY`` is non-empty (token configurable; a gateway
+          without a configured token does not require one).
+        * explicit ``true`` + empty key → :class:`SecurityConfigError`
+          (a gateway must never boot "enabled but toothless").
+        * explicit ``false`` → the test-only disable mode, key ignored.
+
+        Rate-limit rules (task t_89295105): ``VOICE_RATE_LIMIT`` /
+        ``VOICE_RATE_PERIOD`` are optional positive integers with defaults
+        (:data:`DEFAULT_RATE_LIMIT`, :data:`DEFAULT_RATE_PERIOD`).
+        """
+        source = os.environ if env is None else env
+        api_key = source.get("VOICE_API_KEY", "").strip()
+        raw_enabled = source.get("VOICE_AUTH_ENABLED", "").strip().lower()
+        if raw_enabled == "":
+            auth_enabled = bool(api_key)
+        elif raw_enabled in ("1", "true", "yes", "on"):
+            if not api_key:
+                raise SecurityConfigError(
+                    "VOICE_AUTH_ENABLED is true but VOICE_API_KEY is empty"
+                )
+            auth_enabled = True
+        elif raw_enabled in ("0", "false", "no", "off"):
+            auth_enabled = False
+        else:
+            raise SecurityConfigError(
+                "VOICE_AUTH_ENABLED must be true or false, "
+                f"got {raw_enabled!r}"
+            )
+        rate_limit = _parse_rate_value(
+            source.get("VOICE_RATE_LIMIT"), "VOICE_RATE_LIMIT", DEFAULT_RATE_LIMIT
+        )
+        rate_period = _parse_rate_value(
+            source.get("VOICE_RATE_PERIOD"), "VOICE_RATE_PERIOD", DEFAULT_RATE_PERIOD
+        )
+        return cls(
+            api_key=api_key,
+            auth_enabled=auth_enabled,
+            rate_limit=rate_limit,
+            rate_period=rate_period,
+        )
 
 
 def load_hermes_prompt(path: str | Path | None = None) -> str:

@@ -36,7 +36,8 @@ from backend.src.voice_gateway.archive import (
     atomic_write_bytes,
     atomic_write_json,
 )
-from backend.src.voice_gateway.config import STTConfig, STTConfigError
+from backend.src.voice_gateway.config import STTConfig, STTConfigError, SecurityConfig
+from backend.src.voice_gateway.middleware import RateLimiter, RateLimitMiddleware
 from backend.src.voice_gateway.hermes.base import HermesClient
 from backend.src.voice_gateway.hermes.stage import (
     HermesStage,
@@ -159,6 +160,7 @@ def create_app(
     archive_root: str | os.PathLike | None = None,
     stt: STTProvider | None = None,
     hermes: HermesClient | None = None,
+    security: SecurityConfig | None = None,
 ) -> FastAPI:
     """Build the gateway app.
 
@@ -170,7 +172,10 @@ def create_app(
     an env-configured endpoint nor an injected fake is available, STT is
     simply not run. ``hermes`` has no such env-based default (wiring it in
     is a separate card's concern) — Hermes only runs when explicitly
-    injected. When STT is unavailable the app still boots and a plain audio
+    injected. ``security`` (task t_89295105) defaults to
+    :meth:`SecurityConfig.from_env` when left ``None`` — the production
+    singleton picks up ``VOICE_RATE_LIMIT`` / ``VOICE_RATE_PERIOD`` from
+    the environment; tests inject an explicit config. When STT is unavailable the app still boots and a plain audio
     turn still succeeds with 200 + X-Turn-Id — this milestone's ingest-only
     contract ("backend может ответить простым 200 OK без аудио-тела [без
     STT/Hermes/TTS]") is preserved.
@@ -443,6 +448,19 @@ def create_app(
         # this milestone answers plain 200 with no audio body (task spec).
         return Response(status_code=200, media_type="audio/wav",
                         headers={"X-Turn-Id": turn_id})
+
+    # Per-client / per-route rate limiting (task t_89295105). The middleware
+    # sits outside the route handlers: rejected requests get 429 +
+    # Retry-After before the endpoint runs. The limiter lives on
+    # app.state so handlers and tests can inspect or reset it.
+    security = security if security is not None else SecurityConfig.from_env()
+    rate_limiter = RateLimiter(security.rate_limit, security.rate_period)
+    app.state.rate_limiter = rate_limiter
+    app.add_middleware(
+        RateLimitMiddleware,
+        config=security,
+        limiter=rate_limiter,
+    )
 
     return app
 

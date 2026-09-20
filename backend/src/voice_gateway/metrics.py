@@ -20,8 +20,9 @@ The MVP exposes the minimal metric set from ТЗ §34 on ``GET /metrics``:
     request_count_by_route{route}
 
 Label discipline (ТЗ §34): never put transcript, title, turn_id, error
-messages or arbitrary text in labels — the only label is the bounded
-``status`` enum (``success`` / stable ``ErrorCode`` values).
+messages or arbitrary text in labels — only bounded enums: the ``status``
+enum (``success`` / stable ``ErrorCode`` values) and the ``endpoint`` route
+name (a fixed set of registered routes) in ``request_latency_seconds``.
 
 Every metric set is created per app instance (``init_metrics``) so tests can
 use isolated registries and concurrent app instances never share counters.

@@ -99,6 +99,46 @@ def test_metrics_endpoint_exists(tmp_path: Path) -> None:
     assert "text/plain" in resp.headers.get("content-type", "")
 
 
+def test_request_latency_metric_visible_on_metrics_endpoint(tmp_path: Path) -> None:
+    """The request_latency_seconds histogram (endpoint/status labels) must be
+    defined on the app's per-instance VoiceMetrics and scraped back from
+    GET /metrics. Drive one real turn first so the histogram has a sample."""
+    app = _make_app(tmp_path)
+
+    async def run() -> httpx.Response:
+        async with _client(app) as client:
+            r = await client.post("/api/v1/voice/turn",
+                                  content=b"\x00" * 4000,
+                                  headers=_headers("lat-dev"))
+            assert r.status_code == 200
+            return await client.get("/metrics")
+
+    resp = _run(asyncio.new_event_loop(), run())
+    body = resp.text
+    assert "request_latency_seconds" in body, (
+        "request_latency_seconds histogram missing from /metrics scrape")
+
+
+def test_request_latency_observed_per_endpoint_status(tmp_path: Path) -> None:
+    """Observe via the same VoiceMetrics the app wires, with endpoint +
+    status labels, and confirm the scrape distinguishes label values."""
+    from prometheus_client import CollectorRegistry
+
+    from backend.src.voice_gateway.metrics import VoiceMetrics
+    m = VoiceMetrics(CollectorRegistry())
+    m.request_latency.labels(
+        endpoint="/api/v1/voice/turn", status="success").observe(1.1)
+    m.request_latency.labels(
+        endpoint="/api/v1/voice/turn", status="stt_failed").observe(0.02)
+
+    from prometheus_client import generate_latest
+    text = generate_latest(m.registry).decode("utf-8")
+    assert 'request_latency_seconds_count{endpoint="/api/v1/voice/turn",' \
+           'status="success"} 1.0' in text
+    assert 'request_latency_seconds_count{endpoint="/api/v1/voice/turn",' \
+           'status="stt_failed"} 1.0' in text
+
+
 def test_turn_success(tmp_path: Path) -> None:
     app = _make_app(tmp_path)
     pcm = b"\x00" * 8000  # 0.25 s of 16 kHz mono s16le

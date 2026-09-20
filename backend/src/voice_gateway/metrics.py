@@ -168,36 +168,6 @@ class VoiceMetrics:
             "Voice turns currently being processed.",
             registry=registry,
         )
-        # --- Request-level metrics (ТЗ §34) -------------------------------
-        # Labels are bounded by construction: ``route``/``endpoint`` come
-        # from the matched FastAPI route path template (a fixed, finite set
-        # of routes), ``status`` is the HTTP status code, and ``client_id``
-        # is the bounded X-Device-Id device identifier (default
-        # "unknown") — never arbitrary request text.
-        self.active_requests = Gauge(
-            "active_requests",
-            "Requests currently being processed.",
-            registry=registry,
-        )
-        self.request_count = Counter(
-            "request_count_total",
-            "Requests served, by client, route and HTTP status.",
-            ("client_id", "route", "status"),
-            registry=registry,
-        )
-        self.request_latency = Histogram(
-            "request_latency_seconds",
-            "Request processing duration.",
-            ("endpoint", "status"),
-            registry=registry,
-            buckets=_BUCKETS,
-        )
-        self.request_count_by_route = Counter(
-            "request_count_by_route_total",
-            "Requests served, by route.",
-            ("route",),
-            registry=registry,
-        )
 
 
 #: Process-wide namespace used by the module-level ``app`` (production).

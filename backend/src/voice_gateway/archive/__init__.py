@@ -43,6 +43,7 @@ from backend.src.voice_gateway.archive.base import (
     INPUT_WAV_FILENAME,
     RAW_PCM_FILENAME,
 )
+from backend.src.voice_gateway.archive.filesystem import FilesystemArchiveStore
 from backend.src.voice_gateway.archive.metadata import TurnMetadata
 
 
@@ -86,6 +87,7 @@ __all__ = [
     "ArchiveError",
     "ArchiveStore",
     "AudioFormat",
+    "FilesystemArchiveStore",
     "MetadataArchiveStore",
     "TurnMetadata",
     "atomic_write_bytes",

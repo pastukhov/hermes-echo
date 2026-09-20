@@ -22,17 +22,17 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
 
 import anyio
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import generate_latest
+from starlette.datastructures import Headers
 
 from backend.common.error_codes import ErrorCode
 from backend.src.voice_gateway.health import check_live, check_ready
 from backend.src.voice_gateway.archive import (
-    ArchiveStore,
+    MetadataArchiveStore,
     atomic_write_bytes,
     atomic_write_json,
 )
@@ -100,6 +100,61 @@ def pcm_to_wav(pcm_path: Path, wav_path: Path, sample_rate: int, channels: int) 
             dst.write(chunk)
 
 
+class RequestMetricsMiddleware:
+    """Record the four request-level metrics for every request (ТЗ §34).
+
+    Written as a pure ASGI middleware (not ``@app.middleware("http")`` /
+    ``BaseHTTPMiddleware``) because ``BaseHTTPMiddleware`` buffers the
+    request body through an internal stream, which breaks a client
+    disconnect propagating to an endpoint that reads ``request.stream()``
+    directly (a known Starlette limitation) — exactly what the voice-turn
+    endpoint does. This class wraps ``scope``/``receive``/``send``
+    unmodified instead, so streaming and disconnects behave the same as
+    with no middleware installed at all.
+
+    The route label is the matched path *template*
+    (``scope["route"].path``, a fixed finite set) — never the raw URL
+    path, which would be unbounded cardinality (see metrics.py's
+    label-discipline note). Unmatched paths (404s, no route resolved) use
+    the literal "unmatched" label instead. The ``/metrics`` scrape
+    endpoint itself passes through this same middleware like any other
+    request — it is not special-cased.
+    """
+
+    def __init__(self, app, metrics) -> None:
+        self.app = app
+        self.metrics = metrics
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        self.metrics.active_requests.inc()
+        start = time.perf_counter()
+        status = "500"
+
+        async def send_wrapper(message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = str(message["status"])
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            matched_route = scope.get("route")
+            route = matched_route.path if matched_route is not None else "unmatched"
+            client_id = Headers(scope=scope).get("X-Device-Id", "unknown")
+            elapsed = time.perf_counter() - start
+            self.metrics.active_requests.dec()
+            self.metrics.request_latency.labels(endpoint=route, status=status).observe(elapsed)
+            self.metrics.request_count.labels(
+                client_id=client_id, route=route, status=status
+            ).inc()
+            self.metrics.request_count_by_route.labels(route=route).inc()
+
+
 def create_app(
     archive_root: str | os.PathLike | None = None,
     stt: STTProvider | None = None,
@@ -127,9 +182,10 @@ def create_app(
     # isolated registries and concurrent apps never share counters.
     metrics = init_metrics()
 
-    # All archive access goes through the one ArchiveStore (M2-05): it owns
-    # the turn-directory layout (ТЗ §18) and the atomic metadata.json write.
-    store = ArchiveStore(root)
+    # All archive access goes through the one MetadataArchiveStore (M2-05):
+    # it owns the turn-directory layout (ТЗ §18) and the atomic metadata.json
+    # write.
+    store = MetadataArchiveStore(root)
 
     # STT provider: explicit injection wins; otherwise fall back to the
     # env-configured production provider (ТЗ §20). Tests always inject a
@@ -144,40 +200,7 @@ def create_app(
     hermes_stage = HermesStage(hermes) if hermes is not None else None
 
     app = FastAPI(title="Hermes Voice Gateway", version="0.2.0")
-
-    @app.middleware("http")
-    async def track_request_metrics(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        """Record the four request-level metrics for every request (ТЗ §34).
-
-        Wraps ``call_next`` in try/finally so ``active_requests`` is always
-        decremented, even when the endpoint raises. The route label is the
-        matched path *template* (``request.scope["route"].path``, a fixed
-        finite set) — never the raw URL path, which would be unbounded
-        cardinality (see metrics.py's label-discipline note). Unmatched
-        paths (404s, no route resolved) use the literal "unmatched" label
-        instead. The ``/metrics`` scrape endpoint itself passes through this
-        same middleware like any other request — it is not special-cased.
-        """
-        metrics.active_requests.inc()
-        start = time.perf_counter()
-        status = "500"
-        try:
-            response = await call_next(request)
-            status = str(response.status_code)
-            return response
-        finally:
-            matched_route = request.scope.get("route")
-            route = matched_route.path if matched_route is not None else "unmatched"
-            client_id = request.headers.get("X-Device-Id", "unknown")
-            elapsed = time.perf_counter() - start
-            metrics.active_requests.dec()
-            metrics.request_latency.labels(endpoint=route, status=status).observe(elapsed)
-            metrics.request_count.labels(
-                client_id=client_id, route=route, status=status
-            ).inc()
-            metrics.request_count_by_route.labels(route=route).inc()
+    app.add_middleware(RequestMetricsMiddleware, metrics=metrics)
 
     @app.get("/health")
     async def health() -> dict:

@@ -4,6 +4,17 @@ from pathlib import Path
 from backend.src.voice_gateway.models import TTSResult
 
 
+class TTSProviderError(Exception):
+    """Failure to call the TTS endpoint at the transport level.
+
+    Covers network errors, timeouts, non-2xx HTTP responses, invalid WAV
+    bodies and unsupported sample rates. The pipeline maps this to status
+    ``tts_failed`` (ТЗ section 32). Never includes the API key, the
+    Authorization header, response body text, raw audio bytes, or the
+    full vendor response (ТЗ section 33).
+    """
+
+
 class TTSProvider(ABC):
     """Vendor-neutral text-to-speech contract.
 

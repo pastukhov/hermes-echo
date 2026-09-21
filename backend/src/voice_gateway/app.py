@@ -37,7 +37,11 @@ from backend.src.voice_gateway.archive import (
     atomic_write_json,
 )
 from backend.src.voice_gateway.config import STTConfig, STTConfigError, SecurityConfig
-from backend.src.voice_gateway.middleware import RateLimiter, RateLimitMiddleware
+from backend.src.voice_gateway.middleware import (
+    AuthMiddleware,
+    RateLimiter,
+    RateLimitMiddleware,
+)
 from backend.src.voice_gateway.hermes.base import HermesClient
 from backend.src.voice_gateway.hermes.stage import (
     HermesStage,
@@ -461,6 +465,13 @@ def create_app(
         config=security,
         limiter=rate_limiter,
     )
+
+    # Device-token auth (task t_ed297906, ТЗ section 40). Added last so it
+    # wraps outermost — auth runs BEFORE rate limiting, publishing the
+    # authenticated device token as the rate limiter's client identity
+    # (see middleware.py's module docstring, point 1 of `_client_id`'s
+    # priority order) instead of falling back to a raw IP.
+    app.add_middleware(AuthMiddleware, config=security)
 
     return app
 

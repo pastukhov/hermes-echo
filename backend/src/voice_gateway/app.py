@@ -36,7 +36,12 @@ from backend.src.voice_gateway.archive import (
     atomic_write_bytes,
     atomic_write_json,
 )
-from backend.src.voice_gateway.config import STTConfig, STTConfigError, SecurityConfig
+from backend.src.voice_gateway.config import (
+    DEFAULT_HERMES_MODEL,
+    STTConfig,
+    STTConfigError,
+    SecurityConfig,
+)
 from backend.src.voice_gateway.middleware import (
     AuthMiddleware,
     RateLimiter,
@@ -420,6 +425,12 @@ def create_app(
         atomic_write_json(turn_dir / "hermes-request.json",
                           {"turn_id": turn_id, "transcript": transcript.text})
 
+        # Model request metrics (ТЗ §34): the model_name label comes from
+        # the HERMES_MODEL env var with the config default as fallback; the
+        # status label is "success" or the bounded HermesStageError status.
+        model_name = (os.environ.get("HERMES_MODEL", "").strip()
+                      or DEFAULT_HERMES_MODEL)
+
         hermes_start = time.perf_counter()
         metrics.active_turns.inc()
         try:
@@ -430,11 +441,20 @@ def create_app(
                               {"raw": raw, "fallback": FALLBACK_REPLY})
             atomic_write_bytes(turn_dir / "reply.txt",
                                FALLBACK_REPLY.encode("utf-8"))
+            metrics.model_request_latency.labels(model_name=model_name).observe(
+                max(0.0, time.perf_counter() - hermes_start))
+            metrics.model_request_count.labels(model_name=model_name,
+                                               status=e.status).inc()
             return fail_turn(e.status, e.error, input_bytes, audio_duration_ms,
                              extra={"transcript": transcript.text})
         finally:
             metrics.hermes_duration.observe(max(0.0, time.perf_counter() - hermes_start))
             metrics.active_turns.dec()
+
+        metrics.model_request_latency.labels(model_name=model_name).observe(
+            max(0.0, time.perf_counter() - hermes_start))
+        metrics.model_request_count.labels(model_name=model_name,
+                                           status="success").inc()
 
         # --- Success (ТЗ §19/§30): archive reply + note flag. The M2
         # response shape is preserved so the TTS child card can swap the

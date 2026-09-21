@@ -1,0 +1,89 @@
+# docker-compose.yml — Hermes Voice Terminal backend (ТЗ §37 — Backend deployment).
+#
+# From the repo root:
+#     cp .env.example .env   # fill in real values (.env is never committed)
+#     docker compose up --build
+#
+# Smoke check (docs/development.md):
+#     curl -f http://127.0.0.1:8080/health/live
+#     curl -f http://127.0.0.1:8080/health/ready
+#
+# Layout:
+#   - image: built from the existing backend/Dockerfile (build context = repo
+#     root, so the `backend.src.voice_gateway.app:app` import path resolves).
+#   - env: the 16-variable backend set from ТЗ §36 plus the ТЗ §40/§34
+#     auth/rate-limit variables are forwarded into the container. Values
+#     come from .env (auto-loaded by compose + injected via env_file);
+#     ${VAR:-default} below is only a fallback so `docker compose up` does
+#     not fail before .env exists.
+#   - volumes: named volumes on the two in-container mount targets from ТЗ §37
+#     (/data/archive, /data/obsidian).
+#   - user: non-root — the Dockerfile already drops to the `app` user (ТЗ §37).
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: hermes-voice-gateway:latest
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # --- network bind (ТЗ §36). Consumed by the uvicorn launch command in
+      # the Dockerfile (uvicorn --host/--port) and by the published port below;
+      # the app itself does not read these two. ---
+      VOICE_BIND_HOST: ${VOICE_BIND_HOST:-0.0.0.0}
+      VOICE_BIND_PORT: ${VOICE_BIND_PORT:-8080}
+      # --- archive (ТЗ §18/§36): in-container root of the turn archive.
+      # Hardcoded to the volume mount target — not a per-deployment choice.
+      # Must be ARCHIVE_ROOT: that's the variable name app.py actually reads
+      # (os.environ.get("ARCHIVE_ROOT", "archive")) -- ARCHIVE_PATH silently
+      # does nothing and every turn's archive would vanish on container
+      # restart instead of landing in the mounted volume. ---
+      ARCHIVE_ROOT: /data/archive
+      # --- STT (ТЗ §20) ---
+      STT_BASE_URL: ${STT_BASE_URL:-}
+      STT_API_KEY: ${STT_API_KEY:-}
+      STT_MODEL: ${STT_MODEL:-stt}
+      # --- Hermes (ТЗ §21) ---
+      HERMES_BASE_URL: ${HERMES_BASE_URL:-}
+      HERMES_API_KEY: ${HERMES_API_KEY:-}
+      HERMES_MODEL: ${HERMES_MODEL:-hermes}
+      # --- TTS (ТЗ §33) ---
+      TTS_BASE_URL: ${TTS_BASE_URL:-}
+      TTS_API_KEY: ${TTS_API_KEY:-}
+      TTS_MODEL: ${TTS_MODEL:-}
+      TTS_VOICE: ${TTS_VOICE:-}
+      # --- Obsidian notes (ТЗ §25–27): in-container vault root, hardcoded to
+      # the volume mount target (same rationale as ARCHIVE_PATH). ---
+      OBSIDIAN_VAULT_PATH: /data/obsidian
+      OBSIDIAN_INBOX: ${OBSIDIAN_INBOX:-Voice Inbox}
+      NOTE_INCLUDE_TRANSCRIPT: ${NOTE_INCLUDE_TRANSCRIPT:-false}
+    ports:
+      # publish: host port (VOICE_BIND_PORT from .env) -> container port.
+      - "${VOICE_BIND_PORT:-8080}:${VOICE_BIND_PORT:-8080}"
+    volumes:
+      # ТЗ §37: host archive -> /data/archive, Obsidian vault -> /data/obsidian.
+      - archive_data:/data/archive
+      - obsidian_data:/data/obsidian
+    healthcheck:
+      # Лiveness probe on /health/live (ТЗ §35, docs/protocol.md). The
+      # python:slim base has no curl, so probe with python's urllib. The port
+      # follows VOICE_BIND_PORT so a custom port keeps the probe correct.
+      # NOTE: /health/live lands with the health-endpoints task (ТЗ §35);
+      # until then the container reports unhealthy even though uvicorn serves.
+      test:
+        - CMD
+        - python
+        - -c
+        - import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health/live' % os.environ.get('VOICE_BIND_PORT', '8080'))
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  archive_data:
+  obsidian_data:

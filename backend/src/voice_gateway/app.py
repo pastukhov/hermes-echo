@@ -365,6 +365,15 @@ def create_app(
             save_status(ErrorCode.INTERNAL_ERROR.value, "wav finalization failed")
             raise HTTPException(status_code=500, detail=str(ErrorCode.INTERNAL_ERROR))
 
+        # ТЗ §17.2/17.3: the raw PCM is only forensics for a turn that never
+        # reached a valid WAV (ТЗ §32) -- once input.wav is confirmed good,
+        # keeping input.pcm around too is pure duplication. Best-effort: a
+        # failed unlink here must never fail an otherwise-successful turn.
+        try:
+            pcm_path.unlink()
+        except OSError:
+            pass
+
         bytes_per_second = sample_rate * channels * 2
         audio_duration_ms = input_bytes * 1000 // bytes_per_second if bytes_per_second else None
 

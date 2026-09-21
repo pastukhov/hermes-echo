@@ -2,12 +2,15 @@
 #define LED_UI_H
 
 /*
- * M1-05 RGB LED UI driver.
+ * M1-05 status-indicator UI driver.
  *
  * The application sets a device state with led_set_state(); the driver maps
  * each state to a named RGB color and blink pattern (config in led_config.h)
- * and drives the RGB565 channel through the hw seam. No magic numbers in
- * this file: all colors and timings come from led_config.h.
+ * and drives it through hw_led_write() (the hw seam) -- an RGB LED, a
+ * screen fill, or any other indicator a board provides. Naming here still
+ * says "led" for historical reasons (the first target board had one); it
+ * has no bearing on what a given board actually renders. No magic numbers
+ * in this file: all colors and timings come from led_config.h.
  */
 
 #include <stdint.h>

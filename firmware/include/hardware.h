@@ -20,7 +20,11 @@ uint32_t hw_clock_ms(void);
 bool hw_button_raw(void);
 
 /*
- * Drive the single RGB LED. Takes one RGB565 word (0x0000 = off).
+ * Show the given status color on whatever indicator the board has (RGB
+ * LED, screen fill, ...). Takes one RGB565 word (0x0000 = off). The
+ * caller only ever expresses "show this color" -- how a given board
+ * renders it (drive an LED, fill a display) is entirely the board
+ * module's concern.
  */
 void hw_led_write(uint16_t rgb565);
 

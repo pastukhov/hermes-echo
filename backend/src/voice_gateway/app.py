@@ -17,16 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import struct
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-
-import anyio
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
 from prometheus_client import generate_latest
 from starlette.datastructures import Headers
 
@@ -53,6 +50,11 @@ from backend.src.voice_gateway.config import (
     STTConfigError,
     load_hermes_prompt,
 )
+from backend.src.voice_gateway.logging_config import (
+    configure_logging,
+    log_stage_event,
+    transcript_logging_enabled,
+)
 from backend.src.voice_gateway.middleware import (
     AuthMiddleware,
     RateLimiter,
@@ -73,6 +75,8 @@ from backend.src.voice_gateway.stt.client import OpenAICompatibleSTT
 from backend.src.voice_gateway.tts.base import TTSProvider, TTSProviderError
 from backend.src.voice_gateway.tts.config import TTSConfig
 from backend.src.voice_gateway.tts.openai_compatible import OpenAICompatibleTTS
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
@@ -233,6 +237,10 @@ def create_app(
     contract ("backend может ответить простым 200 OK без аудио-тела [без
     STT/Hermes/TTS]") is preserved.
     """
+    # Structured JSON logging (ТЗ §33): idempotent, safe to call every time
+    # create_app() runs (e.g. once per test in this session).
+    configure_logging()
+
     root = Path(os.environ.get("ARCHIVE_ROOT", "archive")) if archive_root is None \
         else Path(archive_root)
 
@@ -395,6 +403,9 @@ def create_app(
         pcm_path = turn_dir / "input.pcm"
         wav_path = turn_dir / "input.wav"
 
+        # archive stage timer (ТЗ §33): covers PCM receive + WAV finalize.
+        archive_start = time.perf_counter()
+
         def save_status(status: str, error: str | None = None,
                         input_bytes: int | None = None,
                         audio_duration_ms: int | None = None,
@@ -424,9 +435,21 @@ def create_app(
             # Client disconnected (or the stream broke) before EOF — ТЗ §32.
             # The client is gone: record the failure, never try to answer.
             save_status(ErrorCode.AUDIO_RECEIVE_FAILED.value, "client disconnected before EOF")
+            log_stage_event(
+                logger, "archive", turn_id=turn_id, device_id=device_id,
+                duration_ms=_ms(time.perf_counter() - archive_start),
+                status=ErrorCode.AUDIO_RECEIVE_FAILED.value,
+                error="client disconnected before EOF",
+            )
             raise
         except Exception as exc:  # noqa: BLE001 — any other stream failure
             save_status(ErrorCode.INTERNAL_ERROR.value, f"stream error: {exc}")
+            log_stage_event(
+                logger, "archive", turn_id=turn_id, device_id=device_id,
+                duration_ms=_ms(time.perf_counter() - archive_start),
+                status=ErrorCode.INTERNAL_ERROR.value,
+                error=f"stream error: {exc.__class__.__name__}",
+            )
             raise
 
         # Terminal-failure helper (ТЗ §13/§32): persist the failure metadata
@@ -458,9 +481,20 @@ def create_app(
         # first with all already-known turn fields.
         # ------------------------------------------------------------------
         if input_bytes == 0:
+            log_stage_event(
+                logger, "archive", turn_id=turn_id, device_id=device_id,
+                duration_ms=_ms(time.perf_counter() - archive_start),
+                status=ErrorCode.AUDIO_INVALID.value, error="empty audio body",
+            )
             return fail_turn(ErrorCode.AUDIO_INVALID.value, "empty audio body",
                              input_bytes, None)
         if input_bytes % 2 != 0:
+            log_stage_event(
+                logger, "archive", turn_id=turn_id, device_id=device_id,
+                duration_ms=_ms(time.perf_counter() - archive_start),
+                status=ErrorCode.AUDIO_INVALID.value,
+                error=f"odd byte count ({input_bytes}): not valid PCM S16LE",
+            )
             return fail_turn(
                 ErrorCode.AUDIO_INVALID.value,
                 f"odd byte count ({input_bytes}): not valid PCM S16LE",
@@ -470,8 +504,21 @@ def create_app(
             pcm_to_wav(pcm_path, wav_path, sample_rate, channels)
         except Exception:
             save_status(ErrorCode.INTERNAL_ERROR.value, "wav finalization failed")
+            log_stage_event(
+                logger, "archive", turn_id=turn_id, device_id=device_id,
+                duration_ms=_ms(time.perf_counter() - archive_start),
+                status=ErrorCode.INTERNAL_ERROR.value,
+                error="wav finalization failed",
+            )
             raise HTTPException(status_code=500, detail=str(ErrorCode.INTERNAL_ERROR))
         pcm_path.unlink(missing_ok=True)
+
+        # archive stage succeeded (ТЗ §33): WAV finalized, PCM cleaned up.
+        log_stage_event(
+            logger, "archive", turn_id=turn_id, device_id=device_id,
+            duration_ms=_ms(time.perf_counter() - archive_start),
+            status="success",
+        )
 
         bytes_per_second = sample_rate * channels * 2
         audio_duration_ms = input_bytes * 1000 // bytes_per_second if bytes_per_second else None
@@ -507,6 +554,12 @@ def create_app(
         except STTClientError as exc:
             metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
             metrics.active_turns.dec()
+            log_stage_event(
+                logger, "stt", turn_id=turn_id, device_id=device_id,
+                duration_ms=_ms(time.perf_counter() - stt_start),
+                status=ErrorCode.STT_FAILED.value,
+                error=exc.__class__.__name__,
+            )
             return fail_turn(ErrorCode.STT_FAILED.value, str(exc),
                              input_bytes, audio_duration_ms)
         except Exception:
@@ -519,6 +572,18 @@ def create_app(
                                          "turn_id": turn_id})
         metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
         metrics.active_turns.dec()
+        log_stage_event(
+            logger, "stt", turn_id=turn_id, device_id=device_id,
+            duration_ms=_ms(time.perf_counter() - stt_start),
+            status="success",
+        )
+
+        # Transcript text is gated behind LOG_TRANSCRIPT + DEBUG (ТЗ §33): a
+        # separate, explicit debug-only log call — never folded into the
+        # INFO-level stage summary above.
+        if transcript_logging_enabled():
+            logger.debug("transcript", extra={"turn_id": turn_id,
+                                              "transcript": transcript.text})
 
         # --- Archive the transcript (ТЗ §18/§19) -------------------------
         atomic_write_bytes(turn_dir / "transcript.txt",
@@ -577,12 +642,43 @@ def create_app(
                               {"raw": raw, "fallback": FALLBACK_REPLY})
             atomic_write_bytes(turn_dir / "reply.txt",
                                FALLBACK_REPLY.encode("utf-8"))
+<<<<<<< HEAD
+=======
+            metrics.model_request_latency.labels(model_name=model_name).observe(
+                max(0.0, time.perf_counter() - hermes_start))
+            metrics.model_request_count.labels(model_name=model_name,
+                                               status=e.status).inc()
+            log_stage_event(
+                logger, "hermes", turn_id=turn_id, device_id=device_id,
+                duration_ms=_ms(time.perf_counter() - hermes_start),
+                status=e.status, error=e.error,
+            )
+>>>>>>> 3fdc6f8 (backend: structured JSON logging per pipeline stage (t_461c0f68, ТЗ §33))
             return fail_turn(e.status, e.error, input_bytes, audio_duration_ms,
                              extra={"transcript": transcript.text})
         finally:
             metrics.hermes_duration.observe(max(0.0, time.perf_counter() - hermes_start))
             metrics.active_turns.dec()
 
+<<<<<<< HEAD
+=======
+        metrics.model_request_latency.labels(model_name=model_name).observe(
+            max(0.0, time.perf_counter() - hermes_start))
+        metrics.model_request_count.labels(model_name=model_name,
+                                           status="success").inc()
+        log_stage_event(
+            logger, "hermes", turn_id=turn_id, device_id=device_id,
+            duration_ms=_ms(time.perf_counter() - hermes_start),
+            status="success",
+        )
+
+        # Hermes reply text is gated behind LOG_TRANSCRIPT + DEBUG (ТЗ §33),
+        # same pattern as the STT transcript above.
+        if transcript_logging_enabled():
+            logger.debug("hermes_reply", extra={"turn_id": turn_id,
+                                                "transcript": response.reply})
+
+>>>>>>> 3fdc6f8 (backend: structured JSON logging per pipeline stage (t_461c0f68, ТЗ §33))
         # --- Success (ТЗ §19/§30): archive reply + note flag. The M2
         # response shape is preserved so the TTS child card can swap the
         # body for real audio later.

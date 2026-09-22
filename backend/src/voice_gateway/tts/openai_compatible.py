@@ -19,12 +19,15 @@ embedded in URLs (ТЗ section 33).
 from __future__ import annotations
 
 import logging
+import time
 import wave
 from io import BytesIO
 from pathlib import Path
 
 import httpx
 
+from backend.common.error_codes import ErrorCode
+from backend.src.voice_gateway.logging_config import log_stage_event
 from backend.src.voice_gateway.models import TTSResult
 from backend.src.voice_gateway.tts.base import TTSProvider, TTSProviderError
 from backend.src.voice_gateway.tts.config import TTSConfig
@@ -49,14 +52,30 @@ class OpenAICompatibleTTS(TTSProvider):
         self._client = client or httpx.Client(timeout=httpx.Timeout(config.timeout))
         self._owns_client = client is None
 
-    def synthesize(self, text: str, out_path: Path) -> TTSResult:
+    def synthesize(
+        self,
+        text: str,
+        out_path: Path,
+        *,
+        turn_id: str | None = None,
+        device_id: str | None = None,
+    ) -> TTSResult:
         """Synthesize ``text`` into the WAV file at ``out_path``.
 
         Raises :class:`TTSProviderError` for transport failures, timeouts,
         non-2xx responses, non-WAV bodies and WAV bodies whose sample rate
         is not one of the supported rates (pipeline maps this to status
         ``tts_failed``, ТЗ section 32).
+
+        ``turn_id``/``device_id`` are optional, keyword-only, and default
+        to ``None`` — this class has no turn context of its own today (TTS
+        is not yet wired into ``app.py``'s ``voice_turn`` handler, ТЗ §33
+        card scope), so they are accepted here purely so a future call
+        site (once TTS is wired in) can pass the turn's identifiers through
+        for structured logging (:func:`log_stage_event`) without breaking
+        this method's existing signature/callers.
         """
+        stage_start = time.perf_counter()
         headers = {}
         if self._config.api_key:
             headers["Authorization"] = f"Bearer {self._config.api_key}"
@@ -74,19 +93,46 @@ class OpenAICompatibleTTS(TTSProvider):
                 timeout=httpx.Timeout(self._config.timeout),
             )
         except httpx.HTTPError as exc:
+            log_stage_event(
+                logger, "tts", turn_id=turn_id, device_id=device_id,
+                duration_ms=int(round((time.perf_counter() - stage_start) * 1000)),
+                status=ErrorCode.TTS_FAILED.value,
+                error=exc.__class__.__name__,
+            )
             raise TTSProviderError(
                 f"tts request failed: {exc.__class__.__name__}"
             ) from exc
 
         if response.status_code >= 400:
             logger.warning("tts returned HTTP %s", response.status_code)
+            log_stage_event(
+                logger, "tts", turn_id=turn_id, device_id=device_id,
+                duration_ms=int(round((time.perf_counter() - stage_start) * 1000)),
+                status=ErrorCode.TTS_FAILED.value,
+                error=f"tts returned HTTP {response.status_code}",
+            )
             raise TTSProviderError(f"tts returned HTTP {response.status_code}")
 
         body = response.content
         if not body:
+            log_stage_event(
+                logger, "tts", turn_id=turn_id, device_id=device_id,
+                duration_ms=int(round((time.perf_counter() - stage_start) * 1000)),
+                status=ErrorCode.TTS_FAILED.value,
+                error="tts returned an empty response body",
+            )
             raise TTSProviderError("tts returned an empty response body")
 
-        sample_rate = self._validate_wav(body)
+        try:
+            sample_rate = self._validate_wav(body)
+        except TTSProviderError as exc:
+            log_stage_event(
+                logger, "tts", turn_id=turn_id, device_id=device_id,
+                duration_ms=int(round((time.perf_counter() - stage_start) * 1000)),
+                status=ErrorCode.TTS_FAILED.value,
+                error=str(exc),
+            )
+            raise
 
         # Streaming TTS responses can leave the RIFF and data sizes as
         # 0xffffffff. Python's wave reader accepts this, but the StickS3
@@ -107,6 +153,11 @@ class OpenAICompatibleTTS(TTSProvider):
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(body)
+        log_stage_event(
+            logger, "tts", turn_id=turn_id, device_id=device_id,
+            duration_ms=int(round((time.perf_counter() - stage_start) * 1000)),
+            status="success",
+        )
         return TTSResult(wav_path=out_path, sample_rate=sample_rate)
 
     @staticmethod

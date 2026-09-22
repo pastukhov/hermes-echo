@@ -1,10 +1,12 @@
 """Tests for the NoteStore abstraction and FilesystemObsidianNoteStore
 (ТЗ sections 25, 26, 36, 51.8-51.9)."""
 import datetime
+import logging
 import os
 
 import pytest
 
+from backend.common.error_codes import ErrorCode
 from backend.src.voice_gateway.notes.note_store import (
     FilesystemObsidianNoteStore,
     NoteSpec,
@@ -245,3 +247,62 @@ def test_create_filesystem_note_store_from_env(tmp_path):
     assert isinstance(store, FilesystemObsidianNoteStore)
     assert store.inbox_path == str(vault / "Voice Inbox")
     assert os.path.isdir(store.inbox_path)
+
+
+# ---------------------------------------------------------------------------
+# Structured stage logging (ТЗ §33): log_stage_event fires on success/failure
+# ---------------------------------------------------------------------------
+
+def test_save_note_success_emits_notes_stage_event(tmp_path, caplog):
+    store = _make_store(tmp_path)
+    with caplog.at_level(logging.INFO):
+        store.save_note(
+            NoteSpec(title="Заметка", content="тело"),
+            turn_id="t-1",
+            device_id="dev-1",
+        )
+    records = [r for r in caplog.records if getattr(r, "stage", None) == "notes"]
+    assert len(records) == 1
+    record = records[0]
+    assert record.status == "success"
+    assert record.turn_id == "t-1"
+    assert record.device_id == "dev-1"
+    assert isinstance(record.duration_ms, int)
+    assert not hasattr(record, "error") or record.error is None
+
+
+def test_save_note_failure_emits_notes_stage_event_with_error_code(tmp_path, monkeypatch, caplog):
+    store = _make_store(tmp_path)
+
+    def _boom(*args, **kwargs):
+        raise OSError("simulated fsync failure")
+
+    monkeypatch.setattr(os, "fsync", _boom)
+
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(NoteStoreError):
+            store.save_note(
+                NoteSpec(title="Заметка", content="тело"),
+                turn_id="t-2",
+                device_id="dev-2",
+            )
+    records = [r for r in caplog.records if getattr(r, "stage", None) == "notes"]
+    assert len(records) == 1
+    record = records[0]
+    assert record.status == ErrorCode.NOTE_WRITE_FAILED.value
+    assert record.error
+    assert record.turn_id == "t-2"
+    assert record.device_id == "dev-2"
+
+
+def test_save_note_missing_device_id_defaults_to_none(tmp_path, caplog):
+    """``device_id`` is not available at every call site — must be
+    accepted as an optional keyword and simply logged as absent, never
+    raise (ТЗ §33)."""
+    store = _make_store(tmp_path)
+    with caplog.at_level(logging.INFO):
+        store.save_note(NoteSpec(title="Заметка", content="тело"), turn_id="t-3")
+    records = [r for r in caplog.records if getattr(r, "stage", None) == "notes"]
+    assert len(records) == 1
+    assert records[0].device_id is None
+    assert records[0].turn_id == "t-3"

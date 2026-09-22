@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from backend.common.error_codes import ErrorCode
 from backend.src.voice_gateway.models import TTSResult
 from backend.src.voice_gateway.tts import TTSProvider, TTSProviderError
 from backend.src.voice_gateway.tts.config import TTSConfig
@@ -354,3 +355,63 @@ class TestLifecycleAndContract:
         with OpenAICompatibleTTS(_config()) as client:
             assert isinstance(client, TTSProvider)
         assert client._client.is_closed is True
+
+
+class TestStageLogging:
+    """ТЗ §33: ``log_stage_event`` fires with the right status/error on
+    both the success and failure paths of ``synthesize()``."""
+
+    def test_success_emits_tts_stage_event(self, tmp_path: Path, caplog):
+        transport = httpx.MockTransport(lambda req: _wav_response(WAV_16K))
+        client = _make_client(transport)
+        with caplog.at_level(logging.INFO):
+            client.synthesize(
+                "hi", tmp_path / "out.wav", turn_id="t-1", device_id="dev-1"
+            )
+        records = [r for r in caplog.records if getattr(r, "stage", None) == "tts"]
+        assert len(records) == 1
+        record = records[0]
+        assert record.status == "success"
+        assert record.turn_id == "t-1"
+        assert record.device_id == "dev-1"
+        assert isinstance(record.duration_ms, int)
+        assert not hasattr(record, "error") or record.error is None
+
+    def test_failure_emits_tts_stage_event_with_error_code(self, tmp_path: Path, caplog):
+        transport = httpx.MockTransport(lambda req: httpx.Response(500, text="boom"))
+        client = _make_client(transport)
+        with caplog.at_level(logging.INFO):
+            with pytest.raises(TTSProviderError):
+                client.synthesize(
+                    "hi", tmp_path / "out.wav", turn_id="t-2", device_id="dev-2"
+                )
+        records = [r for r in caplog.records if getattr(r, "stage", None) == "tts"]
+        assert len(records) == 1
+        record = records[0]
+        assert record.status == ErrorCode.TTS_FAILED.value
+        assert record.error
+        assert record.turn_id == "t-2"
+        assert record.device_id == "dev-2"
+
+    def test_stage_event_never_carries_api_key(self, tmp_path: Path, caplog):
+        transport = httpx.MockTransport(lambda req: httpx.Response(401, text="nope"))
+        client = _make_client(transport)
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(TTSProviderError):
+                client.synthesize("hi", tmp_path / "out.wav", turn_id="t-3")
+        for record in caplog.records:
+            assert API_KEY not in repr(record.__dict__)
+            assert API_KEY not in repr(record.args)
+
+    def test_missing_turn_device_id_default_to_none(self, tmp_path: Path, caplog):
+        """No caller has wired turn context in yet (out of scope, ТЗ §33
+        card) — the stage event must still fire with turn_id/device_id
+        simply absent, not raise."""
+        transport = httpx.MockTransport(lambda req: _wav_response(WAV_16K))
+        client = _make_client(transport)
+        with caplog.at_level(logging.INFO):
+            client.synthesize("hi", tmp_path / "out.wav")
+        records = [r for r in caplog.records if getattr(r, "stage", None) == "tts"]
+        assert len(records) == 1
+        assert records[0].turn_id is None
+        assert records[0].device_id is None

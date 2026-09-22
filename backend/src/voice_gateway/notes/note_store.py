@@ -15,14 +15,21 @@ partially written note.
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import re
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional
 
 import yaml
+
+from backend.common.error_codes import ErrorCode
+from backend.src.voice_gateway.logging_config import log_stage_event
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "NoteSpec",
@@ -76,13 +83,19 @@ class NoteStore(ABC):
     """
 
     @abstractmethod
-    def save_note(self, note: NoteSpec, turn_id: str) -> str:
+    def save_note(self, note: NoteSpec, turn_id: str, *, device_id: str | None = None) -> str:
         """Persist ``note`` for ``turn_id`` and return its note_path.
 
         The returned value is an implementation-defined but always usable
         identifier for the persisted note (for the filesystem realization:
         an absolute path); it must not require the caller to know how the
         concrete NoteStore is organized internally.
+
+        ``device_id`` is optional, keyword-only, and defaults to ``None``
+        — the notes call site has no device context of its own today
+        (notes is not yet wired into ``app.py``'s ``voice_turn`` handler);
+        it exists purely so a future caller can pass it through for
+        structured logging without an incompatible signature change.
         """
 
     @abstractmethod
@@ -134,7 +147,8 @@ class FilesystemObsidianNoteStore(NoteStore):
 
     # -- writing ----------------------------------------------------------
 
-    def save_note(self, note: NoteSpec, turn_id: str) -> str:
+    def save_note(self, note: NoteSpec, turn_id: str, *, device_id: str | None = None) -> str:
+        stage_start = time.perf_counter()
         created_time = note.created or datetime.datetime.now()
         created_str = created_time.strftime("%Y-%m-%d %H-%M-%S")
         sanitized_title = sanitize_title(note.title)
@@ -150,11 +164,28 @@ class FilesystemObsidianNoteStore(NoteStore):
         body = f"---\n{yaml_front}\n---\n# {note.title}\n{note.content}\n"
 
         try:
-            return self._atomic_write(base_filename, body)
-        except NoteStoreError:
+            note_path = self._atomic_write(base_filename, body)
+        except NoteStoreError as exc:
+            log_stage_event(
+                logger, "notes", turn_id=turn_id, device_id=device_id,
+                duration_ms=int(round((time.perf_counter() - stage_start) * 1000)),
+                status=ErrorCode.NOTE_WRITE_FAILED.value, error=str(exc),
+            )
             raise
         except OSError as exc:
+            log_stage_event(
+                logger, "notes", turn_id=turn_id, device_id=device_id,
+                duration_ms=int(round((time.perf_counter() - stage_start) * 1000)),
+                status=ErrorCode.NOTE_WRITE_FAILED.value, error=str(exc),
+            )
             raise NoteStoreError(f"failed to write note: {exc}") from exc
+
+        log_stage_event(
+            logger, "notes", turn_id=turn_id, device_id=device_id,
+            duration_ms=int(round((time.perf_counter() - stage_start) * 1000)),
+            status="success",
+        )
+        return note_path
 
     def _atomic_write(self, base_filename: str, body: str) -> str:
         """Write ``body`` atomically, picking a filename that never

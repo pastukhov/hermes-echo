@@ -17,7 +17,14 @@ class FakeTTS(TTSProvider):
     def __init__(self, prepared_wav: Path) -> None:
         self._prepared_wav = prepared_wav
 
-    def synthesize(self, text: str, out_path: Path) -> TTSResult:
+    def synthesize(
+        self,
+        text: str,
+        out_path: Path,
+        *,
+        turn_id: str | None = None,
+        device_id: str | None = None,
+    ) -> TTSResult:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(self._prepared_wav, out_path)
         with wave.open(str(out_path), "rb") as wav:

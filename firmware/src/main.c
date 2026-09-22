@@ -26,12 +26,14 @@
  *   Button read   : button_driver (include/button_driver.h), unchanged.
  *   LED control   : led_ui (include/led_ui.h) + led_config.h, unchanged.
  *
- *   Spec mapping (Milestone 1):
- *     RECORDING   -> red, blinking   (led_state RECORDING)
- *     PLAYBACK    -> green, blinking (led_state PLAYBACK)
- *     IDLE        -> green, steady
- *     PROCESSING  -> cyan, blinking
- *     ERROR       -> red, fast blink (spec section 9: мигающий красный)
+ *   Spec mapping (spec section 9, ТЗ "LED UI"):
+ *     IDLE        -> dim blue, steady  (слабый синий)
+ *     RECORDING   -> red, steady       (красный)
+ *     PROCESSING  -> yellow, steady    (жёлтый)
+ *     PLAYING     -> green, steady     (Playback = зелёный)
+ *     ERROR       -> red, blinking     (мигающий красный)
+ * The concrete RGB values and blink timings live in led_config.h, driven
+ * through led_ui.c (M1-05).
  *
  * Loopback (Milestone 1 hardware smoke test): there is no backend turn to
  * fetch a reply from yet (networking is Milestone 2, out of scope here),
@@ -71,9 +73,35 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
+
 #include "button_driver.h"
 #include "hardware.h"
 #include "http_session.h"
+#include "http_voice_client.h"
+#include "board_sticks3.h"
+#include "voice_config_httpd.h"
+#include "voice_settings.h"
+#include "wav_parser.h"
+
+#ifndef VOICE_WIFI_SSID
+#define VOICE_WIFI_SSID ""
+#endif
+#ifndef VOICE_WIFI_PASSWORD
+#define VOICE_WIFI_PASSWORD ""
+#endif
+#ifndef VOICE_GATEWAY_URL
+#define VOICE_GATEWAY_URL "http://192.168.1.10:8000/api/v1/voice/turn"
+#endif
+#ifndef VOICE_DEVICE_ID
+#define VOICE_DEVICE_ID "sticks3-01"
+#endif
+#ifndef VOICE_DEVICE_TOKEN
+#define VOICE_DEVICE_TOKEN NULL
+#endif
 #include "led_ui.h"
 #include "ring_buffer.h"
 #include "state_machine.h"
@@ -102,9 +130,38 @@ typedef struct {
    * reordering audio when the sink is momentarily full. */
   uint8_t playback_pending[256];
   size_t playback_pending_len;
+  /*
+   * Playback-side error flags (spec sections 8/13/38): sticky, set by the
+   * test-simulation hooks below exactly like app.rb's ring-buffer-overflow
+   * flag models a RECORDING-side failure. Real backend wiring lands with
+   * M2 (see http_session.c file header); until then these flags are how
+   * "backend connection dropped mid-stream" and "malformed WAV header on
+   * the reply" are driven deterministically for host tests and, later, by
+   * the real M2 download/parsing paths.
+   */
+  bool playback_conn_dropped;
+  bool playback_bad_wav_header;
+  /*
+   * Playback position counter (spec section 8): total bytes handed to the
+   * speaker so far this playback session. Reset to 0 by playback_start()
+   * and, deterministically, by playback_release_resources() on every
+   * PLAYING -> IDLE/ERROR exit, so a stale count from a finished turn can
+   * never leak into the next one.
+   */
+  size_t playback_position;
+  wav_parser_t wav;
+  bool response_eof;
+  bool response_valid;
 } app_t;
 
 static app_t app;
+static http_voice_client_t voice_client;
+static voice_settings_t voice_settings;
+
+static size_t response_pcm_sink(void *ctx, const uint8_t *data, size_t len) {
+  app_t *a = (app_t *)ctx;
+  return ring_buffer_push(&a->playback_rb, data, len);
+}
 
 /* Map app state -> LED device state. */
 static led_state_t led_state_for(state_t s) {
@@ -219,13 +276,67 @@ static void on_ring_buffer_overflow(void) {
 }
 
 /*
+ * Spec section 8: release every playback resource, deterministically and
+ * idempotently, as part of entering IDLE (EOF path) or ERROR (playback
+ * error path) out of PLAYING. Called exactly once per PLAYING exit by
+ * both on_playback_error() and the EOF handler in app_tick()'s
+ * STATE_PLAYING case, so the two paths can never diverge in what they
+ * clean up:
+ *   - stop the DMA/I2S peripheral (hw_audio_playback_stop()) so no more
+ *     bytes reach the speaker regardless of what was still queued,
+ *   - free/zero the loopback ring buffer (ring_buffer_reset(), which also
+ *     clears its internal head/tail/count -- no stale audio or dangling
+ *     read/write position survives into the next turn),
+ *   - drop the one pending unwritten chunk (app.playback_pending_len = 0;
+ *     the bytes themselves are stale scratch space, not a resource that
+ *     needs freeing, but the length must be zeroed so a later playback
+ *     session never mistakes them for real pending data),
+ *   - clear the playback position counter (app.playback_position = 0).
+ * Safe to call from a state that has already released these resources
+ * (e.g. a spurious repeated call): every step here is itself idempotent
+ * (hw_audio_playback_stop() / ring_buffer_reset() on an already-stopped/
+ * already-empty target is a no-op), so calling this twice in a row is
+ * harmless -- the idempotency guarantee in the app_tick() EOF check below
+ * only needs to ensure it isn't reached at all while already IDLE.
+ */
+static void playback_release_resources(void) {
+  hw_audio_playback_stop();
+  ring_buffer_reset(&app.playback_rb);
+  app.playback_pending_len = 0;
+  app.playback_position = 0;
+}
+
+/*
+ * Spec sections 8/13/38 reaction, called when a playback-side error flag is
+ * set (backend connection dropped mid-stream, or the reply's WAV header is
+ * malformed):
+ *   1. playback stops immediately (no more bytes handed to the speaker),
+ *   2. the speaker hardware is stopped (mirrors on_ring_buffer_overflow's
+ *      hw_audio_capture_stop() on the RECORDING side),
+ *   3. the loopback buffer is drained/reset so no stale audio survives into
+ *      the next turn,
+ *   4. ERROR is shown,
+ *   5. recovery back to IDLE happens in the ERROR state (no reboot),
+ *      exactly like the ring-buffer-overflow path already does.
+ */
+static void on_playback_error(const char* what) {
+  playback_release_resources();
+  enter_state(STATE_ERROR, what);
+}
+
+/*
  * Start of local playback (M1-04): prime the speaker so playback_drain()
  * can begin writing to it next tick.
  */
+#ifndef ESP_PLATFORM
 static void playback_start(void) {
   app.playback_pending_len = 0;
-  hw_audio_playback_start();
+  app.playback_position = 0;
+  app.playback_conn_dropped = false;
+  app.playback_bad_wav_header = false;
+  hw_audio_playback_start(NULL, 0);
 }
+#endif
 
 /*
  * Drain side of the audio path (M1-04): hand the loopback buffer to the
@@ -242,6 +353,7 @@ static void playback_drain(void) {
     if (written < app.playback_pending_len) {
       return; /* sink still full; try the same chunk again next tick */
     }
+    app.playback_position += written;
     app.playback_pending_len = 0;
   }
   while (!ring_buffer_empty(&app.playback_rb)) {
@@ -255,6 +367,7 @@ static void playback_drain(void) {
       app.playback_pending_len = n; /* retry this whole chunk next tick */
       break;
     }
+    app.playback_position += written;
   }
 }
 
@@ -262,7 +375,11 @@ static void playback_drain(void) {
  * hardware confirms it actually finished playing them (not just queued). */
 static bool playback_finished(void) {
   return ring_buffer_empty(&app.playback_rb) && app.playback_pending_len == 0 &&
-         hw_audio_playback_drained();
+         hw_audio_playback_drained()
+#ifdef ESP_PLATFORM
+         && app.response_eof && app.response_valid
+#endif
+      ;
 }
 
 void app_init(void) {
@@ -278,7 +395,32 @@ void app_init(void) {
   ring_buffer_init(&app.playback_rb, app.playback_storage,
                     RING_BUFFER_CAPACITY_DEFAULT);
   app.playback_pending_len = 0;
+  app.playback_position = 0;
+  app.playback_conn_dropped = false;
+  app.playback_bad_wav_header = false;
+  app.response_eof = false;
+  app.response_valid = false;
   http_session_init(&app.session);
+#ifdef ESP_PLATFORM
+  (void)voice_settings_load(&voice_settings);
+  if (voice_settings.wifi_ssid[0]) {
+    if (!board_sticks3_wifi_start(voice_settings.wifi_ssid,
+                                  voice_settings.wifi_password)) {
+      (void)board_sticks3_wifi_start_ap("Hermes-StickS3-Setup");
+    }
+  } else {
+    (void)board_sticks3_wifi_start_ap("Hermes-StickS3-Setup");
+  }
+  voice_config_httpd_start(&voice_settings);
+  const http_voice_config_t cfg = {
+      .url = voice_settings.gateway_url,
+      .device_id = voice_settings.device_id,
+      .token = voice_settings.device_token[0] ? voice_settings.device_token : NULL,
+      .timeout_ms = 15000,
+  };
+  if (http_voice_client_init(&voice_client, &cfg) == 0)
+    http_session_bind_transport(&app.session, http_voice_client_transport(&voice_client));
+#endif
 }
 
 /* Current app state (test hook). */
@@ -296,6 +438,19 @@ bool app_session_aborted(void) {
   return app.session.aborted;
 }
 
+/* Test hooks (spec section 8 acceptance criteria): expose the playback
+ * resources directly so tests can verify they are actually released on
+ * PLAYING -> IDLE/ERROR, not just that the state getter reads IDLE. */
+size_t app_playback_position(void) {
+  return app.playback_position;
+}
+size_t app_playback_pending_len(void) {
+  return app.playback_pending_len;
+}
+size_t app_playback_rb_count(void) {
+  return ring_buffer_count(&app.playback_rb);
+}
+
 /*
  * Test hook: simulate the I2S capture task overflowing the ring buffer —
  * pushes through the public API until the sticky flag is raised, exactly
@@ -308,6 +463,26 @@ void app_test_simulate_ring_overflow(void) {
       break;
     }
   }
+}
+
+/*
+ * Test hook: simulate the backend connection dropping mid-stream while a
+ * reply is being downloaded/played (spec sections 8/13/38). Sets the sticky
+ * flag the STATE_PLAYING tick checks; the next tick drives PLAYING -> ERROR
+ * -> (after APP_ERROR_RECOVER_TICKS) IDLE, mirroring
+ * app_test_simulate_ring_overflow() on the RECORDING side.
+ */
+void app_test_simulate_playback_conn_drop(void) {
+  app.playback_conn_dropped = true;
+}
+
+/*
+ * Test hook: simulate the backend's reply arriving with a malformed/
+ * incorrect WAV header (spec sections 8/13/38). Same sticky-flag shape as
+ * app_test_simulate_playback_conn_drop() above.
+ */
+void app_test_simulate_playback_bad_wav_header(void) {
+  app.playback_bad_wav_header = true;
 }
 
 /*
@@ -363,6 +538,12 @@ void app_tick(void) {
          */
         hw_audio_capture_stop();
         session_close_or_abort();
+#ifdef ESP_PLATFORM
+        if (http_voice_client_status(&voice_client) != 200) {
+          enter_state(STATE_ERROR, "voice gateway returned non-200");
+          break;
+        }
+#endif
         enter_state(STATE_PROCESSING, NULL);
       }
       break;
@@ -375,16 +556,86 @@ void app_tick(void) {
        * step is a single, immediate tick — the real "wait for the
        * backend" condition lands with the M2 network wiring.
        */
+#ifdef ESP_PLATFORM
+      ring_buffer_reset(&app.playback_rb);
+      app.response_eof = false;
+      app.response_valid = false;
+      wav_parser_init(&app.wav, response_pcm_sink, &app);
+      hw_audio_playback_start(NULL, 0);
+#else
       playback_start();
+#endif
       enter_state(STATE_PLAYING, NULL);
       break;
 
     case STATE_PLAYING:
-      /* M1-04: drain the loopback buffer to the speaker; wait for the
-       * hardware to confirm playback actually finished before IDLE. */
+      /*
+       * Spec sections 8/13/38: a backend connection drop mid-stream or a
+       * malformed WAV header on the reply must be detected during PLAYING
+       * and drive the device to ERROR immediately -- not hang waiting for
+       * bytes that are never coming, and not silently keep playing
+       * corrupted/incomplete audio. Checked before draining so a failure
+       * flagged this tick takes effect before any more bytes reach the
+       * speaker. Real backend wiring lands with M2 (see http_session.c
+       * file header); the flags are set here by
+       * app_test_simulate_playback_conn_drop() /
+       * app_test_simulate_playback_bad_wav_header() today and, later, by
+       * the real M2 download/parsing path signaling the same failures.
+       */
+      if (app.playback_conn_dropped) {
+        on_playback_error("playback backend connection dropped");
+        break;
+      }
+      if (app.playback_bad_wav_header) {
+        on_playback_error("playback malformed WAV header");
+        break;
+      }
+      /* Pull one bounded response chunk before draining the speaker queue. */
+#ifdef ESP_PLATFORM
+      if (!app.response_eof) {
+        uint8_t net[1024]; size_t received = 0;
+        size_t free_space = ring_buffer_capacity(&app.playback_rb) - ring_buffer_count(&app.playback_rb);
+        size_t poll_capacity = free_space < sizeof(net) ? free_space : sizeof(net);
+        voice_transport_result_t tr = poll_capacity == 0 ? VOICE_TRANSPORT_WOULD_BLOCK
+            : http_session_poll(&app.session, net, poll_capacity, &received);
+        if (tr == VOICE_TRANSPORT_FATAL) { on_playback_error("voice response transport failed"); break; }
+        if (received) {
+          wav_result_t wr = WAV_OK;
+          size_t consumed = wav_parser_feed(&app.wav, net, received, &wr);
+          if (wr == WAV_ERROR || consumed != received) { on_playback_error("WAV response backpressure/error"); break; }
+        }
+        if (tr == VOICE_TRANSPORT_EOF) {
+          app.response_eof = true;
+          app.response_valid = wav_parser_finish(&app.wav) == WAV_OK;
+          if (!app.response_valid) { on_playback_error("truncated WAV response"); break; }
+        }
+      }
+#endif
+      /* M1-04: drain the loopback/response buffer to the speaker; wait for the
+       * hardware to confirm playback actually finished before IDLE.
+       *
+       * EOF detection (spec section 8): playback_finished() is robust to
+       * whatever the buffer fill level was at EOF -- it doesn't care
+       * whether the loopback buffer was full, partially drained, or
+       * empty when the last sample was consumed, only that (a) nothing
+       * is left queued on this side (ring buffer empty, no pending
+       * unwritten chunk) and (b) the hardware confirms it has actually
+       * finished playing what was handed to it (hw_audio_playback_drained,
+       * not just "queued"). Checked every tick, so the PLAYING -> IDLE
+       * transition below fires on the very same tick EOF is confirmed --
+       * no multi-tick delay and no dependence on a specific drain
+       * sequence (full-buffer and near-empty-buffer EOF both resolve
+       * through this one check). */
       playback_drain();
       if (playback_finished()) {
-        hw_audio_playback_stop();
+        /* Resource cleanup on IDLE entry (spec section 8): release the
+         * ring buffer, pending chunk, position counter, and DMA/I2S
+         * peripheral atomically with the state transition -- the same
+         * playback_release_resources() the error path above uses, so
+         * both PLAYING exits leave identical, fully-cleaned-up state and
+         * can never leak a buffer, handle, or dangling position counter
+         * into the next playback session. */
+        playback_release_resources();
         enter_state(STATE_IDLE, NULL);
       }
       break;
@@ -401,12 +652,19 @@ void app_tick(void) {
 }
 
 #ifdef VOICE_WITH_MAIN
-int main(void) {
+static void voice_main_loop(void) {
+  board_sticks3_log_memory();
   app_init();
   for (;;) {
     app_tick();
-    /* On-target: vTaskDelay / idle wait here. */
+    board_sticks3_display_update(app_state(), hw_clock_ms());
+    /* Keep the USB/Wi-Fi/I2S system tasks and watchdog serviced. */
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
-  return 0;
 }
+#ifdef ESP_PLATFORM
+void app_main(void) { voice_main_loop(); }
+#else
+int main(void) { voice_main_loop(); return 0; }
+#endif
 #endif

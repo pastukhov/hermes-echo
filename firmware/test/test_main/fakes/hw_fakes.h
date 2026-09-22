@@ -37,6 +37,12 @@ typedef struct {
   /* Defaults to true (nothing in flight); tests can force false to model
    * "still playing" and observe that PLAYING waits for drain. */
   bool playback_drained;
+  /* Optional per-call cap on how many bytes hw_audio_playback_write()
+   * accepts (0 = unlimited, the default): lets tests model the DMA sink
+   * being momentarily full so a large loopback buffer needs more than one
+   * playback_drain() call to empty, exercising the "regardless of buffer
+   * fill level at EOF" acceptance criterion. */
+  size_t playback_write_limit;
 } hw_fake_t;
 
 extern hw_fake_t g_hw_fake;
@@ -52,4 +58,12 @@ void hw_fake_set_capture_available(hw_fake_t* f, size_t len);
  * finished draining everything handed to it (true, the reset default). */
 void hw_fake_set_playback_drained(hw_fake_t* f, bool drained);
 
-#endif // HW_FAKES_H
+/* Cap how many bytes a single hw_audio_playback_write() call accepts (0 =
+ * unlimited). Models a momentarily-full DMA sink. */
+void hw_fake_set_playback_write_limit(hw_fake_t* f, size_t limit);
+
+void hw_fake_set_playback_drained(hw_fake_t* f, bool drained);
+
+bool hw_audio_playback_drained(void);
+
+#endif //HW_FAKES_H

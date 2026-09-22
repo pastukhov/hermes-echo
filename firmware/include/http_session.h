@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "voice_transport.h"
 
 /*
  * Streaming HTTP upload session for the ESP -> Backend record path
@@ -39,9 +40,11 @@ typedef struct {
   http_session_state_t state;
   size_t bytes_sent;   /* total body bytes handed to the transport */
   bool aborted;        /* true if the session ended via abort() */
+  voice_transport_t *transport;
 } http_session_t;
 
 void http_session_init(http_session_t* s);
+void http_session_bind_transport(http_session_t* s, voice_transport_t *transport);
 
 /* Begin a new session. Fails (returns false) if a session is active. */
 bool http_session_open(http_session_t* s);
@@ -61,6 +64,8 @@ size_t http_session_write(http_session_t* s, const uint8_t* data, size_t len);
  * Returns true once the session has reached CLOSED cleanly.
  */
 bool http_session_close(http_session_t* s);
+voice_transport_result_t http_session_poll(http_session_t *s, uint8_t *data,
+                                            size_t capacity, size_t *received);
 
 /* Force close: for when the network is dead and graceful close is
  * impossible (spec section 10: "если возможно" fallback). */

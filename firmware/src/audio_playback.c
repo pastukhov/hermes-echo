@@ -9,12 +9,14 @@
  */
 
 #include "audio_playback.h"
-#include "board_atom_echo.h"
+#include "board_sticks3.h"
 #include "driver/i2s_common.h"
 #include "driver/i2s_std.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "playback_occupancy.h"
 
 #include <string.h>
 
@@ -54,6 +56,19 @@ static audio_playback_config_t s_config = {
 
 static i2s_chan_handle_t s_tx_chan = NULL;
 
+/* audio_playback_get_buffer_level() bookkeeping (see its own comment for
+ * why this exists): the ESP-IDF I2S channel API has no "bytes still
+ * queued in DMA / not yet played" query -- i2s_channel_get_info()'s
+ * total_dma_buf_size is the fixed allocated *capacity*, not occupancy, so
+ * it can never be used to detect "drained". Instead we track how many
+ * frames have been handed to the driver since playback started and
+ * derive how many of those the hardware must have already played out by
+ * now from wall-clock time at the configured sample rate (I2S transmits
+ * at a fixed, known rate once started, so elapsed-time-since-start is an
+ * exact, monotonically-advancing proxy for frames consumed). */
+static int64_t s_playback_start_us = 0;
+static uint64_t s_total_frames_written = 0;
+
 /* Map user bit depth to the I2S slot bit width. 16-bit PCM is the
  * supported input format (S16LE); 8-bit input is up-converted.
  * Anything else is rejected in init. */
@@ -72,6 +87,8 @@ static void cleanup_resources(void) {
         s_tx_chan = NULL;
     }
     s_state = AUDIO_PLAYBACK_STATE_STOPPED;
+    s_playback_start_us = 0;
+    s_total_frames_written = 0;
 }
 
 esp_err_t audio_playback_init(const audio_playback_config_t *config) {
@@ -184,6 +201,11 @@ esp_err_t audio_playback_start(void) {
     }
 
     s_state = AUDIO_PLAYBACK_STATE_STARTED;
+    /* Reset the occupancy-tracking bookkeeping (see s_total_frames_written's
+     * comment): a fresh playback session starts with nothing queued and
+     * its own zero point in time to measure elapsed playout from. */
+    s_playback_start_us = esp_timer_get_time();
+    s_total_frames_written = 0;
     ESP_LOGI(TAG, "Playback started");
 
     return ESP_OK;
@@ -209,6 +231,8 @@ esp_err_t audio_playback_stop(void) {
     }
 
     s_state = AUDIO_PLAYBACK_STATE_STOPPED;
+    s_playback_start_us = 0;
+    s_total_frames_written = 0;
     ESP_LOGI(TAG, "Playback stopped");
 
     return ESP_OK;
@@ -250,8 +274,15 @@ esp_err_t audio_playback_write(const uint8_t *data, size_t size, uint32_t timeou
         /* The DMA buffers were full and the timeout expired before all data
          * could be accepted. Surface this so the caller can slow its feed. */
         ESP_LOGW(TAG, "Partial write: expected %zu, wrote %zu", size, bytes_written);
+        /* Only the bytes actually accepted by the driver are now "in
+         * flight" -- track those, not the full requested size, so
+         * occupancy accounting below stays accurate even on a partial
+         * write. */
+        s_total_frames_written += bytes_written / frame_size;
         return ESP_ERR_TIMEOUT;
     }
+
+    s_total_frames_written += bytes_written / frame_size;
 
     return ESP_OK;
 }
@@ -261,28 +292,28 @@ audio_playback_state_t audio_playback_get_state(void) {
 }
 
 int audio_playback_get_buffer_level(void) {
-    /* The I2S channel API does not expose a direct "bytes in DMA" query.
-     * Report the DMA occupancy derived from the channel info: the total DMA
-     * buffer size in bytes, scaled by how full the channel currently is.
-     * A simpler, always-valid figure is the total number of DMA frames
-     * currently allocated (i.e. the maximum buffering capacity).
-     */
+    /* True DMA occupancy ("frames handed to the driver that the hardware
+     * has not yet actually played out"), derived without any driver API
+     * that could report it directly (see s_total_frames_written's
+     * comment for why i2s_channel_get_info()'s total_dma_buf_size cannot
+     * be used here -- it is fixed allocated capacity, not occupancy, and
+     * never decreases).
+     *
+     * I2S transmits at a fixed, known rate once a channel is enabled:
+     * exactly sample_rate frames per second. So "frames already played"
+     * is exactly the number of sample periods that have elapsed in
+     * wall-clock time since playback started, clamped to what has
+     * actually been written (the hardware can't play frames it hasn't
+     * been given yet, e.g. if the feeder briefly stalls). Occupancy is
+     * then simply what's been written minus what must already have
+     * played. */
     if (s_tx_chan == NULL || s_state != AUDIO_PLAYBACK_STATE_STARTED) {
         return 0;
     }
 
-    i2s_chan_info_t info;
-    esp_err_t err = i2s_channel_get_info(s_tx_chan, &info);
-    if (err != ESP_OK) {
-        return 0;
-    }
-
-    size_t frame_size = FRAME_SIZE(s_config.channel_count, s_config.bits_per_sample);
-    if (frame_size == 0) {
-        return 0;
-    }
-
-    return (int)(info.total_dma_buf_size / frame_size);
+    int64_t elapsed_us = esp_timer_get_time() - s_playback_start_us;
+    return (int)playback_occupancy_frames(s_total_frames_written, elapsed_us,
+                                           s_config.sample_rate);
 }
 
 esp_err_t audio_playback_deinit(void) {
@@ -306,6 +337,8 @@ esp_err_t audio_playback_deinit(void) {
     }
 
     s_state = AUDIO_PLAYBACK_STATE_STOPPED;
+    s_playback_start_us = 0;
+    s_total_frames_written = 0;
     ESP_LOGI(TAG, "Deinitialized");
 
     return err;

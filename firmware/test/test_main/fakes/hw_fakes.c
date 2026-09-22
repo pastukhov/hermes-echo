@@ -25,6 +25,10 @@ void hw_fake_set_playback_drained(hw_fake_t* f, bool drained) {
   f->playback_drained = drained;
 }
 
+void hw_fake_set_playback_write_limit(hw_fake_t* f, size_t limit) {
+  f->playback_write_limit = limit;
+}
+
 /* ---- seam implementations (host/test build) ---- */
 
 uint32_t hw_clock_ms(void) {
@@ -77,7 +81,9 @@ size_t hw_audio_capture_read(uint8_t* buf, size_t max_len) {
   return chunk;
 }
 
-void hw_audio_playback_start(void) {
+void hw_audio_playback_start(const void* data, size_t size) {
+  (void)data;
+  (void)size;
   g_hw_fake.playback_started = true;
   g_hw_fake.playback_start_calls++;
 }
@@ -91,8 +97,13 @@ size_t hw_audio_playback_write(const uint8_t* data, size_t len) {
   if (!g_hw_fake.playback_started || data == NULL || len == 0) {
     return 0;
   }
-  g_hw_fake.playback_bytes_written_total += len;
-  return len;
+  size_t accepted = len;
+  if (g_hw_fake.playback_write_limit > 0 &&
+      accepted > g_hw_fake.playback_write_limit) {
+    accepted = g_hw_fake.playback_write_limit;
+  }
+  g_hw_fake.playback_bytes_written_total += accepted;
+  return accepted;
 }
 
 bool hw_audio_playback_drained(void) {

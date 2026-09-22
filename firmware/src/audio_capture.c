@@ -19,7 +19,7 @@
  */
 
 #include "audio_capture.h"
-#include "board_atom_echo.h"
+#include "board_sticks3.h"
 #include "driver/i2s_common.h"
 #include "driver/i2s_std.h"
 #include "esp_log.h"

@@ -8,13 +8,15 @@
 /*
  * State-to-mode mapping: one entry per led_state_t, in enum order.
  *
- * Milestone-1 spec mapping (red = record, green = play):
- *   IDLE         -> green, steady
- *   RECORDING    -> red, blinking
- *   PROCESSING   -> cyan, blinking
- *   PLAYBACK     -> green, blinking
- *   WIFI         -> blue, blinking
- *   ERROR        -> orange, fast blink
+ * Spec section 9 (ТЗ, "LED UI") table, verbatim:
+ *   Wi-Fi connection -> мигающий синий (blinking blue)
+ *   Idle             -> слабый синий  (dim blue, steady)
+ *   Recording        -> красный       (red, steady)
+ *   Processing       -> жёлтый        (yellow, steady)
+ *   Playback         -> зелёный       (green, steady)
+ *   Error            -> мигающий красный (blinking red)
+ * Only the two states the table explicitly calls "мигающий" blink; the
+ * others stay steady on their color.
  */
 static const led_mode_cfg_t LED_MODE_BY_STATE[6] = {
   [LED_STATE_WIFI] = {
@@ -23,27 +25,27 @@ static const led_mode_cfg_t LED_MODE_BY_STATE[6] = {
       .blink_duty_ms = LED_BLINK_DUTY_MS,
   },
   [LED_STATE_IDLE] = {
-      .color = LED_RGB_GREEN,
+      .color = LED_RGB_BLUE_DIM,
       .blink_period_ms = 0,
       .blink_duty_ms = 0,
   },
   [LED_STATE_RECORDING] = {
       .color = LED_RGB_RED,
-      .blink_period_ms = LED_BLINK_PERIOD_MS,
-      .blink_duty_ms = LED_BLINK_DUTY_MS,
+      .blink_period_ms = 0,
+      .blink_duty_ms = 0,
   },
   [LED_STATE_PROCESSING] = {
-      .color = LED_RGB_CYAN,
-      .blink_period_ms = LED_BLINK_PERIOD_MS,
-      .blink_duty_ms = LED_BLINK_DUTY_MS,
+      .color = LED_RGB_YELLOW,
+      .blink_period_ms = 0,
+      .blink_duty_ms = 0,
   },
   [LED_STATE_PLAYBACK] = {
       .color = LED_RGB_GREEN,
-      .blink_period_ms = LED_BLINK_PERIOD_MS,
-      .blink_duty_ms = LED_BLINK_DUTY_MS,
+      .blink_period_ms = 0,
+      .blink_duty_ms = 0,
   },
   [LED_STATE_ERROR] = {
-      .color = LED_RGB_ORANGE,
+      .color = LED_RGB_RED,
       .blink_period_ms = LED_BLINK_PERIOD_MS / 2,
       .blink_duty_ms = LED_BLINK_DUTY_MS / 2,
   },

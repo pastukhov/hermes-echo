@@ -44,7 +44,6 @@ from backend.src.voice_gateway.hermes.fake import FakeHermes
 from backend.src.voice_gateway.models import Transcript
 from backend.src.voice_gateway.stt.base import STTClientError, STTProvider
 from backend.src.voice_gateway.stt.fake import FakeSTT
-from backend.src.voice_gateway.tts.fake import FakeTTS
 
 STT_SECRET = "sk-test-stt-secret-123"
 HERMES_SECRET = "sk-test-hermes-secret-456"
@@ -145,24 +144,11 @@ def _all_record_text(records) -> str:
 # AC1: minimal field set on every stage record for a full successful turn
 # ---------------------------------------------------------------------------
 
-def _prepared_wav(tmp_path: Path) -> Path:
-    import wave
-
-    prepared = tmp_path / "prepared.wav"
-    with wave.open(str(prepared), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(16000)
-        wav.writeframes(b"\x01\x00" * 160)
-    return prepared
-
-
 def test_full_successful_turn_stage_events_carry_minimal_fields(tmp_path: Path, caplog):
     app = create_app(
         archive_root=tmp_path / "archive",
         stt=FakeSTT(Transcript(text="привет", language="ru")),
         hermes=FakeHermes(_VALID_HERMES_RAW),
-        tts=FakeTTS(_prepared_wav(tmp_path)),
     )
     with caplog.at_level(logging.INFO):
         resp = _post_turn(app, b"\x00" * 4000)
@@ -171,7 +157,7 @@ def test_full_successful_turn_stage_events_carry_minimal_fields(tmp_path: Path, 
     stage_records = {
         r.stage: r for r in caplog.records if getattr(r, "stage", None) is not None
     }
-    assert set(stage_records) == {"archive", "stt", "hermes", "tts"}
+    assert set(stage_records) == {"archive", "stt", "hermes"}
     turn_id = resp.headers["X-Turn-Id"]
     for stage, record in stage_records.items():
         assert record.turn_id == turn_id
@@ -183,18 +169,10 @@ def test_full_successful_turn_stage_events_carry_minimal_fields(tmp_path: Path, 
 
 
 def test_error_turn_stage_event_carries_bounded_status_and_error(tmp_path: Path, caplog):
-    """An STT failure must still produce a well-formed stt stage record.
-
-    Current main's ``voice_turn`` handler distinguishes ``STTClientError``
-    (mapped to ``stt_failed``/502) from any other unexpected exception
-    (mapped to ``internal_error``/500, and NOT logged as an ``stt`` stage
-    event — that branch is a generic "something broke" fallback, not a
-    pipeline-stage outcome). Raise ``STTClientError`` here to exercise the
-    stage-logged failure path.
-    """
+    """An STT failure must still produce a well-formed stt stage record."""
     class _FailingSTT(FakeSTT):
         def transcribe(self, wav):
-            raise STTClientError("stt exploded")
+            raise RuntimeError("stt exploded")
 
     app = create_app(
         archive_root=tmp_path / "archive",

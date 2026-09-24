@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 330" role="img" aria-labelledby="title desc">
+  <title id="title">StickS3 Wi-Fi setup and recovery</title>
+  <desc id="desc">Connect to the device setup network, configure the home Wi-Fi, then the device retries connection. The setup access point stops after a successful connection; after one minute without an IP it appears again while retries continue.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#101a31"/><stop offset="1" stop-color="#182644"/></linearGradient>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 10 5 0 10z" fill="#6fd4e5"/></marker>
+    <style>text{font-family:Montserrat,Arial,sans-serif;fill:#eaf2ff}.h{font-size:18px;font-weight:700}.p{font-size:14px;fill:#b9c8df}.n{font-size:12px;font-weight:700;letter-spacing:.1em;fill:#65d2e4}</style>
+  </defs>
+  <rect width="1120" height="330" rx="24" fill="url(#bg)"/>
+  <path d="M260 150h44m222 0h44m222 0h44" fill="none" stroke="#6fd4e5" stroke-width="3" marker-end="url(#arr)"/>
+  <path d="M770 218v58H128v-53" fill="none" stroke="#f4b95d" stroke-width="2" stroke-dasharray="7 6" marker-end="url(#arr)"/>
+  <text x="440" y="302" text-anchor="middle" class="p">нет IP за 60 секунд: AP включается, попытки соединения продолжаются</text>
+  <g transform="translate(36 75)">
+    <rect width="224" height="150" rx="18" fill="#203653" stroke="#55bfd2" stroke-width="2"/>
+    <text x="18" y="28" class="n">01 · ПОДКЛЮЧИТЕСЬ</text>
+    <text x="18" y="61" class="h">Setup AP</text>
+    <text x="18" y="88" class="p">Hermes-StickS3-Setup-XX</text>
+    <text x="18" y="113" class="p">Откройте captive portal</text>
+    <text x="18" y="134" class="p">или http://192.168.4.1/</text>
+  </g>
+  <g transform="translate(306 75)">
+    <rect width="220" height="150" rx="18" fill="#203653" stroke="#55bfd2" stroke-width="2"/>
+    <text x="18" y="28" class="n">02 · НАСТРОЙТЕ</text>
+    <text x="18" y="61" class="h">SSID + пароль</text>
+    <text x="18" y="89" class="p">Выберите Wi-Fi сеть</text>
+    <text x="18" y="113" class="p">Укажите gateway URL</text>
+    <text x="18" y="135" class="p">и token, если нужен</text>
+  </g>
+  <g transform="translate(570 75)">
+    <rect width="220" height="150" rx="18" fill="#203653" stroke="#a783e4" stroke-width="2"/>
+    <text x="18" y="28" class="n">03 · ПОДКЛЮЧИТЕСЬ</text>
+    <text x="18" y="61" class="h">Домашняя сеть</text>
+    <text x="18" y="89" class="p">Сохранённая сеть:</text>
+    <text x="18" y="113" class="p">повторные попытки</text>
+    <text x="18" y="135" class="p">примерно каждые 5 с</text>
+  </g>
+  <g transform="translate(834 75)">
+    <rect width="250" height="150" rx="18" fill="#203653" stroke="#79c59c" stroke-width="2"/>
+    <text x="18" y="28" class="n">04 · ГОТОВО</text>
+    <text x="18" y="61" class="h">Получен IP</text>
+    <text x="18" y="89" class="p">Setup AP выключается</text>
+    <text x="18" y="113" class="p">Устройство доступно</text>
+    <text x="18" y="135" class="p">по домашней сети</text>
+  </g>
+</svg>

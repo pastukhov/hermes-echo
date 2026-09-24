@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 430" role="img" aria-labelledby="title desc">
+  <title id="title">Hermes Voice Terminal system overview</title>
+  <desc id="desc">StickS3 sends audio to Voice Gateway. Gateway connects to speech recognition, Hermes or the local Codex adapter, and text-to-speech, then returns audio to the device. Credentials remain on the host.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#101a31"/><stop offset="1" stop-color="#182644"/></linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#19c6e8"/><stop offset="1" stop-color="#0879b9"/></linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 10 5 0 10z" fill="#74d8e8"/></marker>
+    <style>
+      text{font-family:Montserrat,Arial,sans-serif;fill:#eaf2ff}.small{font-size:14px;fill:#b9c8df}.label{font-size:17px;font-weight:700}.title{font-size:25px;font-weight:700}.tag{font-size:12px;font-weight:700;letter-spacing:.08em}
+    </style>
+  </defs>
+  <rect width="1200" height="430" rx="28" fill="url(#bg)"/>
+  <path d="M225 208h65m235 0h75m210 0h70m170 0h65" stroke="#74d8e8" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+  <path d="M740 114v-38h85v38m0 188v38h-85v-38" stroke="#537197" stroke-dasharray="6 6" stroke-width="2" fill="none"/>
+  <g transform="translate(42 100)">
+    <rect x="0" y="0" width="176" height="232" rx="26" fill="#273750" stroke="#5b7395" stroke-width="2"/>
+    <rect x="27" y="25" width="122" height="137" rx="12" fill="#061328" stroke="#405978" stroke-width="2"/>
+    <rect x="34" y="32" width="108" height="123" rx="7" fill="url(#screen)"/>
+    <path d="M75 96a13 13 0 1 1 26 0v20a13 13 0 1 1-26 0zm-7 5h40v8H68z" fill="#eff9ff"/>
+    <rect x="45" y="184" width="86" height="16" rx="8" fill="#077ee3" stroke="#051027" stroke-width="2"/>
+    <text x="88" y="260" text-anchor="middle" class="label">StickS3</text>
+    <text x="88" y="281" text-anchor="middle" class="small">mic · button · speaker</text>
+  </g>
+  <g transform="translate(300 117)">
+    <rect width="220" height="194" rx="20" fill="#203653" stroke="#54bad1" stroke-width="2"/>
+    <path d="M0 50h220" stroke="#385475"/>
+    <text x="110" y="34" text-anchor="middle" class="title">Voice Gateway</text>
+    <text x="110" y="84" text-anchor="middle" class="small">v1 sync · v2 jobs</text>
+    <rect x="28" y="105" width="164" height="31" rx="8" fill="#132641"/><text x="110" y="126" text-anchor="middle" class="small">STT → agent → TTS</text>
+    <text x="110" y="164" text-anchor="middle" class="small">archive · health · metrics</text>
+  </g>
+  <g transform="translate(597 120)">
+    <rect width="138" height="62" rx="14" fill="#183d50" stroke="#51c8dc" stroke-width="2"/>
+    <text x="69" y="27" text-anchor="middle" class="label">Hermes</text><text x="69" y="47" text-anchor="middle" class="small">default agent</text>
+    <rect y="91" width="138" height="79" rx="14" fill="#24324c" stroke="#d6a7ff" stroke-width="2"/>
+    <text x="69" y="119" text-anchor="middle" class="label">Codex</text><text x="69" y="141" text-anchor="middle" class="small">host adapter</text><text x="69" y="159" text-anchor="middle" class="small">loopback only</text>
+  </g>
+  <g transform="translate(827 120)">
+    <rect width="150" height="62" rx="14" fill="#183d50" stroke="#51c8dc" stroke-width="2"/>
+    <text x="75" y="27" text-anchor="middle" class="label">STT</text><text x="75" y="47" text-anchor="middle" class="small">audio → text</text>
+    <rect y="91" width="150" height="62" rx="14" fill="#183d50" stroke="#51c8dc" stroke-width="2"/>
+    <text x="75" y="118" text-anchor="middle" class="label">TTS</text><text x="75" y="138" text-anchor="middle" class="small">text → WAV</text>
+  </g>
+  <g transform="translate(1021 130)">
+    <rect width="137" height="63" rx="14" fill="#203653" stroke="#7ab99c" stroke-width="2"/>
+    <path d="M27 20h22v22H27zm33 0h48v5H60zm0 12h42v5H60z" fill="#9de2bb"/>
+    <text x="68" y="88" text-anchor="middle" class="label">Archive</text>
+    <text x="68" y="109" text-anchor="middle" class="small">audio · transcript</text>
+    <text x="68" y="129" text-anchor="middle" class="small">reply · metadata</text>
+  </g>
+  <text x="600" y="382" text-anchor="middle" class="tag" fill="#9cc2e8">VOICE DATA FLOWS THROUGH THE GATEWAY · CODEX CREDENTIALS STAY ON THE HOST</text>
+</svg>

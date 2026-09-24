@@ -1,6 +1,6 @@
-# HTTP protocol ESP ↔ Voice Gateway
+# HTTP-протокол StickS3 ↔ Voice Gateway
 
-Версия контракта: `X-Protocol-Version: 1`. Транспорт MVP — HTTP в доверенной LAN; HTTPS и WireGuard не требуются, но backend не должен публиковаться в Internet.
+Firmware по умолчанию использует `X-Protocol-Version: 1`; v2 включается в setup page. Транспорт сейчас — HTTP. Оба endpoint’а должны быть доступны только в доверенной сети.
 
 ## ESP → backend: voice turn
 
@@ -12,12 +12,14 @@ Content-Type: audio/L16
 X-Sample-Rate: 16000
 X-Channels: 1
 X-Sample-Format: s16le
-X-Device-Id: atom-echo-01
+X-Device-Id: a1b2c3d4e5f6
 X-Protocol-Version: 1
 Authorization: Bearer <device-token>
 ```
 
-`Authorization` обязателен, если настроен device token; вместо него допустим `X-Device-Token: <token>` согласно конфигурации. Токен никогда не пишется в logs/archive.
+В текущей реализации v1 gateway не проверяет device bearer token. Firmware может отправить заголовок `Authorization`, но это не включает серверную авторизацию v1. Поэтому v1 допустим только в доверенной LAN. Для v2 gateway проверяет bearer token, сопоставленный с `X-Device-Id`. MAC/device ID — идентификатор, не секрет.
+
+Переменная `VOICE_API_KEY` из шаблона `.env.example` не добавляет авторизацию для `/api/v1/voice/turn`. Не полагайтесь на неё для защиты v1 endpoint.
 
 Body — raw PCM S16LE, 16 000 Hz, 1 channel, little-endian signed 16-bit samples. ESP открывает POST при начале записи и передаёт chunks с минимальной задержкой; отпускание кнопки означает EOF/завершение chunked request. Полный audio body не должен собираться в RAM на ESP или backend.
 
@@ -29,11 +31,11 @@ Body — raw PCM S16LE, 16 000 Hz, 1 channel, little-endian signed 16-bit sample
 | `X-Sample-Rate` | `16000` |
 | `X-Channels` | `1` |
 | `X-Sample-Format` | `s16le` |
-| `X-Device-Id` | стабильный device ID, например `atom-echo-01` |
+| `X-Device-Id` | стабильный device ID StickS3: полный Wi-Fi MAC в hex, например `a1b2c3d4e5f6` |
 | `X-Protocol-Version` | `1` |
-| `Authorization` / `X-Device-Token` | configurable device token, если включён |
+| `Authorization` | Firmware может отправить заголовок, но текущий v1 gateway его не проверяет |
 
-## Backend → ESP: success
+## Ответ устройства
 
 ```http
 HTTP/1.1 200 OK
@@ -41,7 +43,7 @@ Content-Type: audio/wav
 X-Turn-Id: 550e8400-e29b-41d4-a716-446655440000
 ```
 
-Body — WAV с PCM signed 16-bit mono; sample rate читается из WAV header (MVP допускает 16 000 или 24 000 Hz). ESP проверяет status, `Content-Type`, минимально разбирает RIFF/WAV header, настраивает I²S по metadata и потоково воспроизводит body. Полный reply.wav не хранится в RAM.
+При настроенном TTS ответ содержит WAV PCM signed 16-bit mono; частота дискретизации берётся из WAV header. Firmware проверяет HTTP status, `Content-Type` и WAV metadata, затем передаёт аудио в playback без хранения полной записи в RAM. Если TTS не сконфигурирован, v1 может вернуть успешный ответ без аудиоданных — для голосового ответа TTS обязателен.
 
 ## Protocol v2: асинхронный голосовой turn
 
@@ -52,7 +54,7 @@ POST /api/v2/voice/turns HTTP/1.1
 Content-Type: audio/L16
 X-Protocol-Version: 2
 X-Request-Id: 9b69da5b-bd5d-44a3-9391-15e8dac36733
-X-Device-Id: sticks3-a1b2c3
+X-Device-Id: a1b2c3d4e5f6
 X-Sample-Rate: 16000
 X-Channels: 1
 Authorization: Bearer <device-token>
@@ -84,25 +86,26 @@ X-Turn-Id: <uuid>
 {"error":"stt_failed","turn_id":"..."}
 ```
 
-JSON поля: `error` — стабильный машинный код; `turn_id` — UUID turn. Технические секреты, binary audio и лишний user text в ошибке не возвращаются. Firmware не озвучивает JSON и показывает ошибку на экране до подтверждения кнопкой.
+JSON поля: `error` — машинный код; `turn_id` — UUID turn, если он уже создан. Технические секреты и binary audio не возвращаются. Firmware показывает ошибку на экране до нажатия кнопки.
 
 ## Ошибки и рекомендуемые статусы
 
 | Код | HTTP | Значение |
 |---|---:|---|
-| `unauthorized` | 401 | отсутствует/неверен device token |
-| `unsupported_protocol` | 400/426 | неизвестная protocol version |
-| `invalid_headers` | 400 | отсутствуют или неверны audio headers |
-| `audio_invalid` | 400 | пустой/некорректный PCM или неподдерживаемый формат |
-| `audio_receive_failed` | 400/499 | stream оборван или не прочитан |
-| `stt_failed` | 502/504 | STT provider error/timeout |
-| `hermes_failed` | 502/504 | Hermes request error/timeout |
-| `hermes_invalid_response` | 502 | JSON не прошёл validation после одной repair attempt |
-| `note_write_failed` | 500* | note storage failure; при успешном reply pipeline по возможности продолжает TTS |
-| `tts_failed` | 502/504 | TTS provider error/timeout |
-| `internal_error` | 500 | непредвиденная backend ошибка |
+| Код | HTTP | Где возникает |
+|---|---:|---|
+| `unauthorized` | 401 | v2: token не соответствует `X-Device-Id` |
+| `protocol_version_required` | 400 | v2 upload без `X-Protocol-Version: 2` |
+| `invalid_request_id` | 400 | v2: request ID не является UUID |
+| `audio_too_large` | 413 | v2: upload превысил лимит 3 840 000 байт |
+| `audio_invalid` | 400 | пустой/нечётный по размеру PCM upload |
+| `idempotency_conflict` | 409 | повторный request ID с другим audio body |
+| `upload_in_progress` | 409 | повторный upload этого request ID ещё идёт |
+| `agent_busy` | 429 | очередь v2 переполнена |
+| `audio_not_ready` | 409 | WAV запрошен до завершения обработки |
+| `stt_failed`, `agent_unavailable`, `tts_failed` | terminal status | обработка v2 не завершилась; код находится в `error` status payload |
 
-`*` Для ошибки note допустим успешный voice response с диагностикой в metadata, если reply/TTS завершились; NoteStore failure не должен уничтожать успешный Hermes reply.
+HTTP status и JSON shape для v1 ошибок зависят от этапа обработки; устройства не следует привязывать к произвольному диагностическому тексту.
 
 ## Служебные endpoints
 
@@ -116,7 +119,7 @@ GET /metrics
 
 ## Внутренний Hermes contract
 
-Gateway отправляет STT transcript в OpenAI-compatible Hermes endpoint с отдельными `HERMES_BASE_URL`, `HERMES_API_KEY`, `HERMES_MODEL`, `HERMES_TIMEOUT`. Ожидаемый результат:
+Hermes provider получает STT transcript через OpenAI-compatible endpoint, заданный `HERMES_BASE_URL`, `HERMES_API_KEY`, `HERMES_MODEL` и `HERMES_TIMEOUT`. Ожидаемый ответ агента имеет вид:
 
 ```json
 {
@@ -125,4 +128,4 @@ Gateway отправляет STT transcript в OpenAI-compatible Hermes endpoint
 }
 ```
 
-При `create:false` title/content пусты, tags — массив; note не создаётся, но voice turn архивируется. Это внутренний контракт gateway, а не payload ESP.
+Поле `note` архивируется как часть ответа агента. Хотя в репозитории есть Obsidian `NoteStore`, текущий активный pipeline не сохраняет его в vault. JSON агента — внутренний контракт gateway, а не payload ESP.

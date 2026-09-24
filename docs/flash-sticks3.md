@@ -1,45 +1,63 @@
-# Flashing StickS3
+# Настройка и прошивка M5Stack StickS3
 
-Build the ESP32-S3 image from `firmware/`:
+Инструкция для StickS3 (ESP32-S3). Она описывает provisioning по Wi-Fi и PlatformIO build. Подключение к реальному устройству и успешная прошивка должны проверяться отдельно.
+
+![Настройка домашней сети и восстановление setup AP](assets/wifi-setup-flow.svg)
+
+## Что понадобится
+
+- M5Stack StickS3 и USB-кабель с передачей данных.
+- Wi-Fi 2.4 GHz, к которому устройство сможет подключиться.
+- Запущенный Voice Gateway в той же доступной сети.
+- PlatformIO Core для сборки; Serial Monitor — для диагностики.
+
+## Настройка через captive portal
+
+1. При первом старте подключитесь телефоном или компьютером к `Hermes-StickS3-Setup-XX`. `XX` — последний байт Wi-Fi MAC в нижнем регистре hex.
+2. Подтвердите предложение открыть сеть/портал. Если оно не появилось, откройте `http://192.168.4.1/`.
+3. Выберите домашний SSID из списка или введите его вручную; задайте пароль и endpoint шлюза.
+4. Оставьте protocol v1, если не настраивали v2 tokens. Для v1 укажите полный URL `/api/v1/voice/turn`. Для v2 укажите только базовый URL вида `http://192.168.1.10:8080`, выберите v2 и введите token устройства.
+5. Нажмите **Save & Restart**. После перезапуска устройство подключится к сохранённой сети.
+
+Пароль или token можно оставить пустым, чтобы сохранить текущее значение. В v2 gateway должен содержать соответствующий device ID → token mapping в `VOICE_DEVICE_TOKENS`; MAC — идентификатор, не секрет. Страница настройки открыта без пароля, но firmware принимает её запросы только из setup subnet.
+
+Если устройство не получило IP по сохранённым настройкам за 60 секунд, оно включает setup AP, продолжая повторять подключение примерно каждые пять секунд. После получения IP AP выключается. Сеть AP открытая; если captive prompt не показывается, подключитесь к ней вручную и откройте адрес выше.
+
+## Сборка
+
+Из корня репозитория:
 
 ```sh
-/home/artem/platformio/.venv/bin/platformio run -d firmware -e sticks3
+cd firmware
+export HERMES_WIFI_SSID='your-network'
+export HERMES_WIFI_PASSWORD='your-password'
+export HERMES_GATEWAY_URL='http://192.168.1.10:8080/api/v1/voice/turn'
+pio run -e sticks3
 ```
 
-Hold KEY1 while connecting USB when download mode is required, then use
-`platformio run -e sticks3 -t upload` and `platformio device monitor`.
+Build flags считывают три значения из окружения и встраивают defaults в образ. Firmware также сохраняет настройки страницы в NVS; не коммитьте реальные build-переменные, токены или пароли. Устройство ID формируется из полного Wi-Fi MAC и показывается в интерфейсе.
 
-The target is configured for 8 MB flash and Octal PSRAM. A first boot must log
-the detected flash/PSRAM sizes before hardware audio is considered validated.
-Do not put Wi-Fi credentials or device tokens in this file or in `platformio.ini`.
+## Прошивка и serial log
 
-For a private build, pass credentials and endpoint as `HERMES_WIFI_SSID`,
-`HERMES_WIFI_PASSWORD`, and `HERMES_GATEWAY_URL` environment variables. PlatformIO consumes these as build
-flags; keep the values outside the repository. Settings can also be changed
-from the device's setup page and are saved in NVS. Blank password/token fields
-in the page keep the currently stored secret.
+Подключите устройство и проверьте найденный порт:
 
-## Setup page
+```sh
+pio device list
+pio run -e sticks3 -t upload --upload-port /dev/ttyACM0
+pio device monitor --port /dev/ttyACM0 --baud 115200
+```
 
-Without saved Wi-Fi credentials, connect to `Hermes-StickS3-Setup-XX`, where
-`XX` is the final byte of the device's Wi-Fi MAC in lowercase hexadecimal.
-With saved credentials, the device tries the home network first. If it has
-not obtained an IP within one minute (also after a later disconnect), it
-starts the setup AP while continuing to retry the home connection. Once it
-gets an IP, the setup AP turns off. The phone should detect the
-captive portal and offer to open the setup page. If it does not, open
-`http://192.168.4.1/` manually.
-The page scans nearby Wi-Fi networks and configures the SSID/password, voice
-gateway URL, and optional device token. The device ID is always derived from
-the Wi-Fi MAC and is shown on the screen. A successful save restarts
-the device. The page and its JSON/scan endpoints reject clients outside the
-device setup subnet, so they are not available through the home/station LAN.
-The setup AP is open (no password), so use it only during local provisioning.
+Замените `/dev/ttyACM0` на свой порт. StickS3 может потребовать ручного входа в download mode: удерживайте KEY1 во время переподключения USB, затем повторите загрузку. Настройка PlatformIO предотвращает автоматический reset во время upload, поэтому download mode нужно включить вручную при необходимости.
 
-## On-device status display
+Для проверки host-side логики firmware без устройства:
 
-The StickS3 screen uses a compact Russian status view: «ГОТОВ», «СЛУШАЮ»,
-«ДУМАЮ», «ОТВЕЧАЮ», and «ОШИБКА» each have a distinct accent and central
-indicator. The Wi-Fi bars reflect station connectivity; short Russian button
-hints appear under the current state. The rendering is native RGB565 and uses
-the existing ST7789 driver without an additional graphics-library dependency.
+```sh
+cd firmware
+pio test -e native
+```
+
+Успешная native test/build не доказывает, что прошивка корректна на реальном аудиокодеке или что Wi-Fi и gateway работают на конкретном устройстве. После upload отдельно проверьте boot log, домашнее подключение, голосовой запрос и воспроизведение.
+
+## На экране
+
+Состояния отображаются на LCD: `ГОТОВ`, `СЛУШАЮ`, `ДУМАЮ`, `ОТВЕЧАЮ`, `ОШИБКА`. Экран ошибки остаётся до нажатия кнопки. Отдельная LED-индикация не используется.

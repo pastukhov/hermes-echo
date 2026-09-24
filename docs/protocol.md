@@ -45,7 +45,7 @@ X-Turn-Id: 550e8400-e29b-41d4-a716-446655440000
 
 При настроенном TTS ответ содержит WAV PCM signed 16-bit mono; частота дискретизации берётся из WAV header. Firmware проверяет HTTP status, `Content-Type` и WAV metadata, затем передаёт аудио в playback без хранения полной записи в RAM. Если TTS не сконфигурирован, v1 может вернуть успешный ответ без аудиоданных — для голосового ответа TTS обязателен.
 
-## Protocol v2: асинхронный голосовой turn
+## Протокол v2: асинхронный голосовой запрос
 
 v2 добавляет долговечный job API для ответов, которые могут длиться дольше одного HTTP-запроса. V1 остаётся доступной без изменений.
 
@@ -117,7 +117,7 @@ GET /metrics
 
 `/health/live` возвращает `200`, когда процесс жив. `/health/ready` возвращает `200`, если config загружен и обязательный archive writable; иначе `503`. `/metrics` возвращает Prometheus exposition format (`text/plain` или совместимый content type) и не использует transcript/title/turn_id/error text как labels.
 
-## Внутренний Hermes contract
+## Внутренний контракт Hermes
 
 Hermes provider получает STT transcript через OpenAI-compatible endpoint, заданный `HERMES_BASE_URL`, `HERMES_API_KEY`, `HERMES_MODEL` и `HERMES_TIMEOUT`. Ожидаемый ответ агента имеет вид:
 

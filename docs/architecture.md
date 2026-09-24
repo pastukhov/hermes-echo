@@ -94,11 +94,11 @@ sequenceDiagram
 
 Wi-Fi setup AP имеет SSID `Hermes-StickS3-Setup-XX`, где `XX` — последний байт Wi-Fi MAC. Если сохранённая сеть не выдала IP за минуту, устройство включает setup AP и продолжает повторные подключения. После получения IP AP останавливается. См. [иллюстрацию Wi-Fi fallback](assets/wifi-setup-flow.svg) и [инструкцию прошивки](flash-sticks3.md).
 
-## Codex Agent Service
+## Сервис Codex Agent
 
 Это отдельное приложение на host-компьютере. Оно обращается к закреплённому `openai-codex` SDK и стандартной авторизации Codex локального пользователя. Сервис сохраняет SQLite-соответствие `device_id → thread_id`, принимает запросы от gateway по loopback и не монтирует домашний каталог Codex в контейнер. Один device продолжает собственный разговор; reset создаёт новую сессию. Детали — в [инструкции deployment](../deploy/codex-voice-agent.md).
 
-## Archive, notes и метрики
+## Архив, заметки и метрики
 
 Audio turn и служебные результаты сохраняются под `ARCHIVE_ROOT/YYYY/MM/DD/<turn-id>/`. Для v2 используется SQLite job database (по умолчанию внутри archive). `/health/live` проверяет только доступность процесса; `/health/ready` проверяет обязательную конфигурацию и возможность записи в archive. Временная недоступность удалённого STT или TTS сама по себе не делает процесс unhealthy. `/metrics` отдаёт Prometheus metrics без transcript и произвольного текста в labels.
 

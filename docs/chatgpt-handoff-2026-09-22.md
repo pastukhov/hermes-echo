@@ -145,7 +145,7 @@ voice_httpd: settings UI started on port 80
 
 ## Полезные файлы
 
-- [Firmware README](../firmware/README.md)
+- [Руководство по прошивке StickS3](flash-sticks3.md)
 - [Flash guide](flash-sticks3.md)
 - [Voice terminal context](voice-terminal-context.md)
 - [Progress log](../.superpowers/sdd/2026-09-22-sticks3-hermes-terminal/progress.md)

@@ -1,0 +1,24 @@
+# Local credentials and environment
+.env
+
+# Python caches and test artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+**/.venv/
+*.sqlite
+*.sqlite-*
+
+# Local voice archives and worktrees
+/archive/
+/.worktrees/
+
+# Editor and downloaded build dependencies
+/.vscode/
+/firmware/managed_components/
+
+# Generated firmware test reports
+/firmware/test_results.txt
+/firmware/smoke_test_results.txt

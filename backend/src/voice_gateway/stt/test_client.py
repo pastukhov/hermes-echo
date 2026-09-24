@@ -95,6 +95,8 @@ class TestSuccessfulRequest:
         assert b"whisper-1" in seen["body"]
         assert b'name="file"' in seen["body"]
         assert b'name="model"' in seen["body"]
+        assert b'name="response_format"' in seen["body"]
+        assert b'verbose_json' in seen["body"]
         # The file part declares audio/wav (ТЗ section 20)
         assert b"audio/wav" in seen["body"]
 

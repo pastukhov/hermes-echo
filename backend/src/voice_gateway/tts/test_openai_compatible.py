@@ -91,6 +91,7 @@ class TestSuccessfulRequest:
             "model": "tts-1",
             "voice": "alloy",
             "input": "Привет, мир.",
+            "response_format": "wav",
         }
 
     def test_base_url_used_verbatim_no_suffix_appended(self, tmp_path: Path):
@@ -141,6 +142,26 @@ class TestSuccessfulRequest:
         client = _make_client(transport)
         result = client.synthesize("hi", tmp_path / "out.wav")
         assert result.sample_rate == 24000
+
+    def test_rewrites_streaming_wav_lengths_for_device_parser(self, tmp_path: Path):
+        # The live TTS service marks both lengths as unknown. StickS3 rejects
+        # the odd data length 0xffffffff before it can play the response.
+        streaming = bytearray(WAV_24K)
+        streaming[4:8] = b"\xff" * 4
+        streaming[40:44] = b"\xff" * 4
+        client = _make_client(
+            httpx.MockTransport(lambda req: _wav_response(bytes(streaming)))
+        )
+
+        out_path = tmp_path / "out.wav"
+        result = client.synthesize("hi", out_path)
+        normalized = out_path.read_bytes()
+
+        assert result.sample_rate == 24000
+        assert normalized[:4] == b"RIFF"
+        assert int.from_bytes(normalized[4:8], "little") == len(normalized) - 8
+        assert int.from_bytes(normalized[40:44], "little") == len(normalized) - 44
+        assert normalized[44:] == WAV_24K[44:]
 
 
 class TestExplicitTimeouts:

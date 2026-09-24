@@ -15,11 +15,14 @@ import httpx
 from fastapi import FastAPI
 
 from backend.src.voice_gateway.app import FALLBACK_REPLY, create_app
+from backend.src.voice_gateway.config import STTConfig
 from backend.src.voice_gateway.hermes.base import HermesClient, HermesClientError
 from backend.src.voice_gateway.hermes.fake import FakeHermes
 from backend.src.voice_gateway.models import Transcript
 from backend.src.voice_gateway.stt.base import STTClientError, STTProvider
+from backend.src.voice_gateway.stt.client import OpenAICompatibleSTT
 from backend.src.voice_gateway.stt.fake import FakeSTT
+from backend.src.voice_gateway.tts.fake import FakeTTS
 
 _VALID_HERMES_RAW = (
     '{"reply": "Готово.", "note": {"create": false, "title": "", '
@@ -170,6 +173,55 @@ def test_turn_success(tmp_path: Path) -> None:
     assert meta["input_bytes"] == len(pcm)
     assert meta["audio_duration_ms"] == 250
     assert meta["started_at"] and meta["finished_at"]
+
+
+def test_turn_with_real_async_stt_client_completes(tmp_path: Path) -> None:
+    def stt_response(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/audio/transcriptions"
+        return httpx.Response(200, json={"text": "привет", "language": "ru"})
+
+    async def run() -> httpx.Response:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(stt_response)) as stt_http:
+            stt = OpenAICompatibleSTT(STTConfig(base_url="http://stt.test/v1"), client=stt_http)
+            app = create_app(archive_root=tmp_path / "archive", stt=stt,
+                             hermes=FakeHermes(_VALID_HERMES_RAW))
+            async with _client(app) as client:
+                return await client.post("/api/v1/voice/turn", content=b"\x00\x00" * 4000,
+                                         headers=_headers("test-device"))
+
+    response = _run(asyncio.new_event_loop(), run())
+    assert response.status_code == 200
+    assert len(_find_turn_dirs(tmp_path / "archive")) == 1
+
+
+def test_configured_full_turn_returns_nonempty_wav(tmp_path: Path) -> None:
+    import wave
+
+    prepared = tmp_path / "prepared.wav"
+    with wave.open(str(prepared), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\x01\x00" * 160)
+
+    app = create_app(
+        archive_root=tmp_path / "archive",
+        stt=FakeSTT(Transcript(text="тестовая расшифровка", language="ru")),
+        hermes=FakeHermes(_VALID_HERMES_RAW),
+        tts=FakeTTS(prepared),
+    )
+    pcm = b"\x00" * 8000
+
+    async def run() -> httpx.Response:
+        async with _client(app) as client:
+            return await client.post("/api/v1/voice/turn", content=pcm,
+                                     headers=_headers("full-turn"))
+
+    resp = _run(asyncio.new_event_loop(), run())
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/wav"
+    assert resp.content.startswith(b"RIFF")
+    assert len(resp.content) > 44
 
 
 def test_turn_fragmented_stream_finalizes_valid_wav(tmp_path: Path) -> None:
@@ -671,6 +723,40 @@ def test_stt_wired_without_hermes_still_transcribes(tmp_path: Path) -> None:
     assert meta["status"] == "success"
     assert meta["transcript"] == "привет без гермеса"
     assert meta["turn_id"] == turn_id
+
+
+class _UnclassifiedSTT(STTProvider):
+    """STT stand-in raising an UNCLASSIFIED exception (ТЗ §32 catch-all)."""
+
+    def transcribe(self, wav: Path) -> Transcript:
+        raise RuntimeError("simulated unclassified pipeline failure")
+
+
+def test_turn_unclassified_exception_is_internal_error(tmp_path: Path) -> None:
+    """An unhandled Exception (not a known ErrorCode) must degrade to a
+    sanitized 500 ``{"error": "internal_error", "turn_id"}`` with
+    metadata.json status=internal_error — no stacktrace, exception class,
+    or internal detail in the client-facing body (ТЗ §32)."""
+    app = create_app(archive_root=tmp_path / "archive", stt=_UnclassifiedSTT())
+
+    resp = _post_turn(app, b"\x00" * 4000)
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert set(body) == {"error", "turn_id"}
+    assert body["error"] == "internal_error"
+    uuid.UUID(body["turn_id"])
+    text = resp.text
+    for leak in ("RuntimeError", "simulated unclassified pipeline failure",
+                 "Traceback"):
+        assert leak not in text
+
+    meta = json.loads(
+        (_last_turn_dir(tmp_path / "archive") / "metadata.json")
+        .read_text(encoding="utf-8"))
+    assert meta["status"] == "internal_error"
+    assert meta["error"]
+    assert meta["turn_id"] == body["turn_id"]
 
 
 class _ValidatingSTT(STTProvider):

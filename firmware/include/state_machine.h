@@ -12,7 +12,7 @@
  * and a recoverable error state.
  *
  * Valid transitions:
- *   BOOT       -> IDLE | ERROR
+ *   BOOT       -> IDLE | PROCESSING | ERROR (PROCESSING resumes a saved v2 turn)
  *   IDLE       -> RECORDING | ERROR
  *   RECORDING  -> PROCESSING | ERROR
  *   PROCESSING -> PLAYING | ERROR

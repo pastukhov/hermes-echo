@@ -97,3 +97,4 @@ class HermesStage:
                 status=ErrorCode.HERMES_INVALID_RESPONSE.value,
                 error=str(exc),
             ) from exc
+

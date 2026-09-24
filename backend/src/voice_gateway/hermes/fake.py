@@ -29,3 +29,4 @@ class FakeHermes(HermesClient):
     def end_turn(self) -> None:
         """Mark the current turn as finished (advances the call budget)."""
         self._turn = self.calls
+

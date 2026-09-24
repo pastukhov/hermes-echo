@@ -1,0 +1,11 @@
+# Host-side Codex voice adapter. The SDK brings its matching Codex CLI runtime.
+openai-codex==0.156.1
+
+# HTTP app dependencies are kept aligned with the Voice Gateway.
+fastapi==0.133.1
+uvicorn==0.41.0
+httpx==0.28.1
+pydantic==2.13.4
+
+# Test runner for the host service.
+pytest==9.0.2

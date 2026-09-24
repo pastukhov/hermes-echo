@@ -26,7 +26,7 @@ from typing import Mapping, Optional
 #: considered loaded (ТЗ §36: the two required provider endpoint roots).
 #: ``*_API_KEY`` are optional (auth-less endpoints are supported), so an
 #: empty key never makes the config invalid.
-_REQUIRED_ENV_VARS = ("HERMES_BASE_URL", "STT_BASE_URL")
+_REQUIRED_ENV_VARS = ("STT_BASE_URL",)
 
 
 @dataclass(frozen=True)
@@ -104,8 +104,17 @@ def check_ready(
     """
     checks: dict = {}
 
-    missing = [name for name in _REQUIRED_ENV_VARS
-               if not (env.get(name) or "").strip()]
+    provider = (env.get("VOICE_AGENT_PROVIDER") or "hermes").strip().lower()
+    required = list(_REQUIRED_ENV_VARS)
+    if provider == "hermes":
+        required.append("HERMES_BASE_URL")
+    elif provider == "codex":
+        required.extend(("CODEX_AGENT_URL", "CODEX_AGENT_TOKEN"))
+    else:
+        checks["provider"] = "error:VOICE_AGENT_PROVIDER must be hermes or codex"
+    missing = [name for name in required if not (env.get(name) or "").strip()]
+    if provider not in {"hermes", "codex"}:
+        missing.append("VOICE_AGENT_PROVIDER")
     checks["config"] = ("ok" if not missing
                         else "error:missing " + ",".join(missing))
 

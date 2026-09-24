@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from backend.src.voice_gateway.models import Transcript
+from backend.src.voice_gateway.models.transcript import Transcript
 from backend.src.voice_gateway.stt.base import STTProvider
 
 

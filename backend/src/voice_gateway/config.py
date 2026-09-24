@@ -11,14 +11,6 @@ Environment variables (secrets stay out of the repo — ТЗ section 51):
     STT_API_KEY       optional; sent as ``Authorization: *** when set
     STT_MODEL         model name
     STT_TIMEOUT       seconds; recommended default 60 (ТЗ section 31)
-
-    VOICE_API_KEY     optional; required for API-key auth to be effective
-    VOICE_AUTH_ENABLED  optional; "true"/"false" — force auth on/off. When
-                        unset, auth is enabled only if VOICE_API_KEY is set.
-    VOICE_RATE_LIMIT  optional, int; max requests per client per window
-                        (default 100)
-    VOICE_RATE_PERIOD  optional, int; the rate window in seconds
-                        (default 60)
 """
 from __future__ import annotations
 
@@ -74,6 +66,33 @@ def _parse_rate_value(raw: str | None, name: str, default: int) -> int:
     if value <= 0:
         raise SecurityConfigError(f"{name} must be a positive integer")
     return value
+
+
+class AgentConfigError(ValueError):
+    """Invalid voice-agent provider configuration."""
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    provider: str
+    codex_url: str = ""
+    codex_token: str = ""
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "AgentConfig":
+        source = os.environ if env is None else env
+        provider = source.get("VOICE_AGENT_PROVIDER", "hermes").strip().lower()
+        if provider not in {"hermes", "codex"}:
+            raise AgentConfigError("VOICE_AGENT_PROVIDER must be hermes or codex")
+        if provider == "hermes":
+            return cls(provider)
+        url = source.get("CODEX_AGENT_URL", "").strip()
+        token = source.get("CODEX_AGENT_TOKEN", "").strip()
+        if not url:
+            raise AgentConfigError("CODEX_AGENT_URL is required for Codex provider")
+        if not token:
+            raise AgentConfigError("CODEX_AGENT_TOKEN is required for Codex provider")
+        return cls(provider, url, token)
 
 
 @dataclass(frozen=True)

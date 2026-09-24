@@ -1,8 +1,8 @@
 # docker-compose.yml — Hermes Voice Terminal backend (ТЗ §37 — Backend deployment).
 #
 # From the repo root:
-#     cp .env.example .env   # fill in real values (.env is never committed)
-#     docker compose up --build
+#     docker compose --env-file /home/artem/.hermes/.env up --build -d backend
+#     # Only the explicitly mapped Hermes/OpenAI keys below enter the container.
 #
 # Smoke check (docs/development.md):
 #     curl -f http://127.0.0.1:8080/health/live
@@ -22,6 +22,8 @@
 
 services:
   backend:
+    # The Hermes API listens on host loopback; bridge networking cannot reach it.
+    network_mode: host
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -31,8 +33,8 @@ services:
         required: false
     environment:
       # --- network bind (ТЗ §36). Consumed by the uvicorn launch command in
-      # the Dockerfile (uvicorn --host/--port) and by the published port below;
-      # the app itself does not read these two. ---
+      # the Dockerfile (uvicorn --host/--port); host networking binds directly
+      # on the host instead of publishing a container port. ---
       VOICE_BIND_HOST: ${VOICE_BIND_HOST:-0.0.0.0}
       VOICE_BIND_PORT: ${VOICE_BIND_PORT:-8080}
       # --- archive (ТЗ §18/§36): in-container root of the turn archive.
@@ -42,27 +44,31 @@ services:
       # does nothing and every turn's archive would vanish on container
       # restart instead of landing in the mounted volume. ---
       ARCHIVE_ROOT: /data/archive
+      VOICE_JOB_DATABASE: /data/archive/voice-jobs.sqlite
+      VOICE_AGENT_PROVIDER: ${VOICE_AGENT_PROVIDER:-hermes}
+      # The host-side Codex adapter is loopback-bound; host networking lets
+      # this existing gateway reach it without exposing Codex credentials.
+      CODEX_AGENT_URL: ${CODEX_AGENT_URL:-http://127.0.0.1:8765}
+      CODEX_AGENT_TOKEN: ${CODEX_AGENT_TOKEN:-}
+      VOICE_DEVICE_TOKENS: ${VOICE_DEVICE_TOKENS:-}
       # --- STT (ТЗ §20) ---
-      STT_BASE_URL: ${STT_BASE_URL:-}
-      STT_API_KEY: ${STT_API_KEY:-}
-      STT_MODEL: ${STT_MODEL:-stt}
+      STT_BASE_URL: ${STT_BASE_URL:-https://api.openai.com/v1}
+      STT_API_KEY: ${STT_API_KEY:-${VOICE_TOOLS_OPENAI_KEY:-}}
+      STT_MODEL: ${STT_MODEL:-whisper-1}
       # --- Hermes (ТЗ §21) ---
-      HERMES_BASE_URL: ${HERMES_BASE_URL:-}
-      HERMES_API_KEY: ${HERMES_API_KEY:-}
-      HERMES_MODEL: ${HERMES_MODEL:-hermes}
+      HERMES_BASE_URL: ${HERMES_BASE_URL:-http://127.0.0.1:8642/v1}
+      HERMES_API_KEY: ${HERMES_API_KEY:-${API_SERVER_KEY:-}}
+      HERMES_MODEL: ${HERMES_MODEL:-upstage/solar-pro4:free}
       # --- TTS (ТЗ §33) ---
-      TTS_BASE_URL: ${TTS_BASE_URL:-}
-      TTS_API_KEY: ${TTS_API_KEY:-}
-      TTS_MODEL: ${TTS_MODEL:-}
-      TTS_VOICE: ${TTS_VOICE:-}
+      TTS_BASE_URL: ${TTS_BASE_URL:-https://api.openai.com/v1/audio/speech}
+      TTS_API_KEY: ${TTS_API_KEY:-${VOICE_TOOLS_OPENAI_KEY:-}}
+      TTS_MODEL: ${TTS_MODEL:-gpt-4o-mini-tts}
+      TTS_VOICE: ${TTS_VOICE:-alloy}
       # --- Obsidian notes (ТЗ §25–27): in-container vault root, hardcoded to
       # the volume mount target (same rationale as ARCHIVE_PATH). ---
       OBSIDIAN_VAULT_PATH: /data/obsidian
       OBSIDIAN_INBOX: ${OBSIDIAN_INBOX:-Voice Inbox}
       NOTE_INCLUDE_TRANSCRIPT: ${NOTE_INCLUDE_TRANSCRIPT:-false}
-    ports:
-      # publish: host port (VOICE_BIND_PORT from .env) -> container port.
-      - "${VOICE_BIND_PORT:-8080}:${VOICE_BIND_PORT:-8080}"
     volumes:
       # ТЗ §37: host archive -> /data/archive, Obsidian vault -> /data/obsidian.
       - archive_data:/data/archive
@@ -71,8 +77,6 @@ services:
       # Лiveness probe on /health/live (ТЗ §35, docs/protocol.md). The
       # python:slim base has no curl, so probe with python's urllib. The port
       # follows VOICE_BIND_PORT so a custom port keeps the probe correct.
-      # NOTE: /health/live lands with the health-endpoints task (ТЗ §35);
-      # until then the container reports unhealthy even though uvicorn serves.
       test:
         - CMD
         - python

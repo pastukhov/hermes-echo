@@ -20,7 +20,7 @@ static bool is_valid_transition(state_t from, state_t to) {
   }
   switch (from) {
     case STATE_BOOT:
-      return to == STATE_IDLE;
+      return to == STATE_IDLE || to == STATE_PROCESSING;
     case STATE_IDLE:
       return to == STATE_RECORDING;
     case STATE_RECORDING:

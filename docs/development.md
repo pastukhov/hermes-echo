@@ -1,107 +1,92 @@
-# Разработка и проверка
+# Разработка и запуск
 
-## Локальное окружение
+Команды запускайте из корня репозитория, если отдельно не указано иное. Проект состоит из Python gateway, отдельного Python Codex adapter и firmware для ESP-IDF.
 
-Требуются Python 3.12+, `uv` или venv/pip, PlatformIO Core и ESP-IDF toolchain, совместимый с выбранным PlatformIO environment. Backend и firmware — независимые компоненты.
+## Требования
 
-```bash
+- Python 3.12.
+- Docker Compose для контейнерного запуска gateway (опционально).
+- PlatformIO Core и ESP-IDF environment из `firmware/platformio.ini` для сборки устройства.
+- Доступные STT и TTS endpoint’ы, совместимые с OpenAI API. Hermes требуется при `VOICE_AGENT_PROVIDER=hermes`; при `codex` нужен host adapter.
+
+## Настройка окружения
+
+```sh
 cp .env.example .env
-python3.12 -m venv backend/.venv
-. backend/.venv/bin/activate
-python -m pip install -e 'backend[dev]'
+# Укажите локальные URL, модели и ключи в .env; не коммитьте его.
 ```
 
-Запускайте gateway из корня:
+Минимальная конфигурация для voice turn: `STT_BASE_URL`, `TTS_BASE_URL`, `TTS_MODEL`, и один agent provider. Для Hermes задайте `HERMES_BASE_URL` (и при необходимости ключ/модель); для Codex — `VOICE_AGENT_PROVIDER=codex`, `CODEX_AGENT_URL` и `CODEX_AGENT_TOKEN`. Имена и defaults смотрите в `.env.example` и `docker-compose.yml`.
 
-```bash
-. backend/.venv/bin/activate
-uvicorn voice_gateway.main:app --app-dir backend/src --host 127.0.0.1 --port 8080
+## Запуск шлюза
+
+### Docker Compose
+
+```sh
+docker compose up --build -d backend
+curl --fail http://127.0.0.1:8080/health/live
+curl --fail http://127.0.0.1:8080/health/ready
+curl --fail http://127.0.0.1:8080/metrics
 ```
 
-Для LAN используйте `VOICE_BIND_HOST=0.0.0.0` только если понимаете границу доступа.
+Compose запускает gateway в host network mode. Так шлюз видит локальные сервисы хоста, например Hermes на `127.0.0.1`, но слушающий `0.0.0.0` порт также может быть доступен другим узлам сети — проверьте firewall и доверие к LAN. Остановка: `docker compose down`.
 
-## Backend tests
+### Локально
 
-```bash
-cd backend
+```sh
+python3.12 -m venv .venv
 . .venv/bin/activate
-pytest
-pytest -q
+python -m pip install -r backend/requirements.txt -r agent_service/requirements.txt
+uvicorn backend.src.voice_gateway.app:app --host 127.0.0.1 --port 8080
 ```
 
-Unit tests должны покрывать:
+Для самостоятельного запуска Codex adapter следуйте [Codex deployment guide](../deploy/codex-voice-agent.md).
 
-- Archive: PCM stream, корректный WAV header, metadata и error metadata.
-- Hermes: valid response, invalid JSON, одна успешная repair attempt, repair failure, timeout.
-- Notes: `create=false`, Markdown, sanitization имени, atomic write, duplicate title и filesystem error.
-- Pipeline: FakeSTT, FakeHermes, FakeTTS и FakeNoteStore без реальных внешних сервисов.
+## Проверки
 
-Интеграционный fixture `tests/fixtures/test_voice.wav` проходит HTTP endpoint → FakeSTT → FakeHermes → FakeTTS → WAV response. Проверяются HTTP 200, archive, transcript, metadata, условная `.md` note и валидный WAV.
+Backend tests запускаются из корня (корневой `conftest.py` настраивает import path):
 
-Для тестов задавайте временные `ARCHIVE_PATH`/vault и mock providers. Не используйте production API keys и реальные пользовательские записи.
+```sh
+pytest -q backend
+cd agent_service
+python -m pytest -q tests
+```
 
-## Firmware build и tests
+Эти тесты используют fake runtime и HTTP mock transport. Они не доказывают, что текущая сессия Codex авторизована или что внешние STT/TTS endpoint’ы доступны.
 
-```bash
+Native tests firmware не требуют подключённого устройства:
+
+```sh
 cd firmware
-pio run
 pio test -e native
 ```
 
-Hardware-independent тесты должны покрывать state machine, WAV parser, HTTP response handling, config validation и bounded retry/backoff. Аппаратные audio/I²S проверки выполняются на ATOM Echo отдельно. Прошивка должна собираться на ESP-IDF environment, не на Arduino.
+Сборка целевой платы:
 
-Прошивка платы:
-
-```bash
-pio run -t upload
-pio device monitor
+```sh
+cd firmware
+export HERMES_WIFI_SSID='your-network'
+export HERMES_WIFI_PASSWORD='your-password'
+export HERMES_GATEWAY_URL='http://192.168.1.10:8080/api/v1/voice/turn'
+pio run -e sticks3
 ```
 
-Локальные Wi‑Fi secrets и device token держите в неотслеживаемом файле/секции конфигурации, не в git.
+Сборка получает Wi-Fi и endpoint через переменные окружения. Не вставляйте реальные значения в shell history, git или документацию; для повторяемой локальной настройки применяйте защищённый env-файл. Порядок прошивки описан в [руководстве StickS3](flash-sticks3.md).
 
-## Docker smoke check
+## Диагностика
 
-```bash
-docker compose up --build -d
-curl -f http://127.0.0.1:8080/health/live
-curl -f http://127.0.0.1:8080/health/ready
-docker compose logs --tail=100
+| Симптом | Что проверить |
+| --- | --- |
+| `/health/live` доступен, `/health/ready` возвращает 503 | Поля `checks` в ответе: обязательные STT/agent config и права записи `ARCHIVE_ROOT` |
+| Устройство не появляется в домашней сети | После минуты ищите `Hermes-StickS3-Setup-XX`; устройство продолжает попытки STA-подключения |
+| Wi-Fi работает, voice turn завершается ошибкой | Gateway URL, protocol version, устройство/token mapping, STT/TTS настройки и логи gateway |
+| v2 upload принят, но ответа нет | Проверяйте `GET /api/v2/voice/turns/{turn_id}` и archive metadata; terminal error возвращается кодом `error` |
+| Codex service не ready | Проверяйте вход в Codex CLI под тем же системным пользователем и `GET /health/ready` adapter’а; не копируйте credentials в контейнер |
 
-docker compose down
-```
+## Данные и безопасность
 
-Проверьте, что archive и Obsidian volumes действительно смонтированы, а процесс в контейнере работает с ожидаемыми правами.
-
-## Ручные acceptance scenarios
-
-### A. Запись заметки
-
-1. Соберите и прошейте firmware.
-2. Дождитесь Wi‑Fi и LED `IDLE`.
-3. Удерживайте кнопку и скажите: `Запиши заметку: купить новый USB-C кабель для лаборатории.`
-4. Отпустите кнопку; LED должен перейти в processing.
-5. Убедитесь, что в archive появился `input.wav`, а STT сохранил transcript.
-6. Убедитесь, что Hermes вернул `note.create=true` и в Obsidian inbox появился `.md`.
-7. Убедитесь, что TTS вернул WAV и ATOM произнёс короткий ответ.
-8. Проверьте возврат LED в `IDLE`.
-
-### B. Обычный вопрос
-
-1. Удерживайте кнопку и скажите: `Сколько будет два плюс два?`
-2. После отпускания дождитесь ответа `Четыре.` (или эквивалентного).
-3. Убедитесь, что `note.create=false`, новая Obsidian note не появилась.
-4. Убедитесь, что archive для voice turn создан всё равно.
-
-## Definition of Done checklist
-
-Перед релизом проверьте: PlatformIO/ESP-IDF build; Wi‑Fi и push-to-talk; потоковую передачу без полной ESP RAM записи; WAV archive; STT transcript; structured Hermes response; conditional Obsidian note; TTS/playback; recovery без reboot; health endpoints; Prometheus metrics; unit/integration tests; отсутствие secrets в git; документацию запуска. WireGuard и deep sleep должны отсутствовать в MVP.
-
-## Безопасность и git
-
-```bash
-git status --short
-git diff --check
-git grep -n -E 'sk-[A-Za-z0-9]|Bearer [A-Za-z0-9._-]{20,}|API_KEY=.+' -- ':!*.md'
-```
-
-Последняя команда — только эвристическая проверка; дополнительно используйте secret scanner CI. `.env`, Wi‑Fi passwords, device tokens и provider keys не коммитьте. Не логируйте ключи, binary audio и transcript на INFO. Не отключайте тесты/validation ради прохождения CI.
+- Archive содержит аудио, расшифровку и ответ; ограничьте права и срок хранения.
+- v2 job database хранится рядом с archive, если `VOICE_JOB_DATABASE` не переопределён.
+- `/health/ready` не проверяет текущую доступность внешних STT/TTS сетей.
+- Не используйте настоящие записи и ключи в тестах. Setup AP открытый и работает только для локального provisioning.
+- Перед публикацией gateway проверьте bind address, firewall и отсутствие секретов в логах.

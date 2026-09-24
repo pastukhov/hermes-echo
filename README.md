@@ -1,129 +1,64 @@
-# Hermes Voice Terminal
+# Hermes Voice Terminal · StickS3
 
-Голосовой терминал на M5Stack ATOM Echo: кнопка запускает запись PCM, ESP32 потоково отправляет её в Python Voice Gateway, а gateway выполняет STT → Hermes → опциональную заметку → TTS и возвращает WAV для воспроизведения.
+Голосовой терминал на M5Stack StickS3: удерживайте кнопку, скажите фразу и отпустите её — устройство отправит запись в Voice Gateway и воспроизведёт ответ.
 
-MVP работает в доверенной локальной Wi‑Fi сети и использует half-duplex цикл `RECORDING → PROCESSING → PLAYBACK`. Firmware остаётся «тупым» терминалом: она захватывает, отправляет, принимает и воспроизводит аудио; AI-логика, архив, Hermes и Obsidian находятся в backend.
+Проект состоит из прошивки устройства, Python-шлюза и отдельного host-сервиса для Codex. По умолчанию шлюз использует Hermes; Codex можно включить настройкой. Ни прошивка, ни Docker-контейнер не получают доступ к Codex credentials.
 
-## Состав
+![Схема компонентов и границ безопасности](docs/assets/system-overview.svg)
 
-- `firmware/` — ESP-IDF/PlatformIO firmware для M5Stack ATOM Echo.
-- `backend/` — Python 3.12+, FastAPI voice gateway.
-- `docs/architecture.md` — компоненты и поток данных.
-- `docs/protocol.md` — HTTP-контракт ESP ↔ gateway.
-- `docs/development.md` — разработка и тесты.
-- `docker-compose.yml` — запуск gateway в контейнере.
-- `.env.example` — полный шаблон конфигурации без секретов.
+## С чего начать
 
-## Быстрый старт
+1. [Настройте и запустите Voice Gateway](docs/development.md#запуск-шлюза).
+2. Если хотите отвечать через Codex, настройте [host-side Codex Agent](deploy/codex-voice-agent.md). Для Hermes этот шаг не нужен.
+3. Подключите StickS3 к Wi-Fi через [setup portal и прошейте устройство](docs/flash-sticks3.md).
+4. Посмотрите [архитектуру и путь голосового запроса](docs/architecture.md), [HTTP-протокол](docs/protocol.md) или полный [указатель документации](docs/index.md).
 
-### 1. Клонирование
+## Быстрый запуск шлюза
 
-```bash
-git clone <repository-url> hermes-voice-terminal
-cd hermes-voice-terminal
-```
+Нужны Docker Compose и доступные endpoint’ы STT, Hermes (либо локальный Codex Agent) и TTS.
 
-Подставьте URL своего репозитория вместо `<repository-url>`.
-
-### 2. Конфигурация
-
-```bash
+```sh
 cp .env.example .env
-$EDITOR .env
+# Откройте .env и настройте endpoint’ы и модели; секреты оставьте только в этом локальном файле.
+docker compose up --build -d backend
+curl --fail http://127.0.0.1:8080/health/live
+curl --fail http://127.0.0.1:8080/health/ready
 ```
 
-Заполните URL, модели и ключи STT/Hermes/TTS, пути архива и Obsidian. Файл `.env` не коммитьте. Backend должен слушать LAN только осознанно; не публикуйте его напрямую в Internet.
+Compose запускает gateway с `network_mode: host`, поэтому он может обращаться к локальным сервисам на хосте. Проверьте сетевую изоляцию перед запуском в общей или недоверенной сети; не публикуйте gateway в Internet. Остальные проверки и запуск без Docker описаны в [руководстве разработки](docs/development.md).
 
-Минимально нужны `STT_BASE_URL`, `STT_API_KEY`, `STT_MODEL`, `HERMES_BASE_URL`, `HERMES_API_KEY`, `HERMES_MODEL`, `TTS_BASE_URL`, `TTS_API_KEY`, `TTS_MODEL`, `ARCHIVE_PATH`, `OBSIDIAN_VAULT_PATH` и `VOICE_DEVICE_TOKEN` (если включена проверка устройства).
+## Подключение StickS3
 
-### 3. Локальный backend
+Без сохранённых Wi-Fi настроек устройство поднимает открытую сеть `Hermes-StickS3-Setup-XX`, где `XX` — последние два hex-символа Wi-Fi MAC. Телефон обычно предлагает открыть setup portal автоматически; если нет, перейдите на `http://192.168.4.1/`.
 
-```bash
-cd backend
-python3.12 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e '.[dev]'
-cd ..
-. backend/.venv/bin/activate
-uvicorn voice_gateway.main:app --host 0.0.0.0 --port "${VOICE_BIND_PORT:-8080}"
-```
+В веб-форме выберите сеть и укажите Gateway endpoint:
 
-Проверьте:
+- для **v1** — полный адрес, например `http://192.168.1.10:8080/api/v1/voice/turn`;
+- для **v2** — только базовый адрес, например `http://192.168.1.10:8080`, и отдельный device token.
 
-```bash
-curl http://127.0.0.1:8080/health/live
-curl http://127.0.0.1:8080/health/ready
-curl http://127.0.0.1:8080/metrics
-```
+Сохранённая сеть получает минуту на подключение. Если подключиться не удалось, setup AP включится, а устройство продолжит попытки соединения. При успешном подключении AP выключится. В v2 gateway должен знать пару device ID → token; подробности — в [настройке устройства](docs/flash-sticks3.md) и [протоколе](docs/protocol.md).
 
-Ожидается `200` для live; ready дополнительно проверяет загруженную конфигурацию и доступность записи в archive (и note storage, если он включён).
+## Голосовой запрос
 
-### 4. Backend через Docker
+Устройство использует half-duplex цикл: `ГОТОВ → СЛУШАЮ → ДУМАЮ → ОТВЕЧАЮ → ГОТОВ`. Состояние ошибки остаётся на экране до нажатия кнопки. Отдельная LED-индикация не используется.
 
-Из корня проекта:
+В v1 запрос обрабатывается одним синхронным HTTP-вызовом. В v2 gateway сначала сохраняет аудио как задачу, затем устройство проверяет её состояние и скачивает WAV. v2 нужен отдельный bearer token на устройство.
 
-```bash
-cp .env.example .env
-# заполните .env
-docker compose up --build
-```
+## Содержимое репозитория
 
-Compose монтирует архив в `/data/archive`, а vault в `/data/obsidian`. Для остановки:
+| Путь | Назначение |
+| --- | --- |
+| `firmware/` | ESP-IDF/PlatformIO прошивка M5Stack StickS3 |
+| `backend/` | FastAPI Voice Gateway, Hermes/Codex orchestration, STT/TTS, archive и v2 jobs |
+| `agent_service/` | локальный host-side адаптер Codex Python SDK |
+| `deploy/` | systemd unit и установка Codex adapter |
+| `docs/` | архитектура, протокол, разработка, прошивка и схемы |
+| `docker-compose.yml` | запуск gateway в контейнере |
+| `.env.example` | шаблон переменных без рабочих секретов |
 
-```bash
-docker compose down
-```
+## Важно
 
-Не добавляйте ключи в `Dockerfile`, compose-файл или git. Контейнер запускайте non-root, если это поддерживает выбранная конфигурация.
-
-### 5. Настройка и прошивка ATOM Echo
-
-Установите PlatformIO (CLI или IDE), USB-драйверы платы и подключите ATOM Echo. В firmware создайте локальную secrets-конфигурацию по примеру проекта и задайте Wi‑Fi, URL gateway, device ID и лимит записи. Секреты firmware не коммитьте.
-
-```bash
-cd firmware
-pio run
-pio run -t upload
-pio device monitor
-```
-
-Проверьте в `platformio.ini`, что выбран ESP-IDF environment для ATOM Echo, а не Arduino framework. Gateway URL должен указывать на IP компьютера в LAN, например `http://192.168.1.20:8080`.
-
-### 6. Первый голосовой запрос
-
-1. Дождитесь мигающего синего LED во время подключения и слабого синего LED в `IDLE`.
-2. Удерживайте кнопку и произнесите: `Запиши заметку: купить новый USB-C кабель для лаборатории.`
-3. Отпустите кнопку.
-4. Дождитесь обработки и ответа `Записал.` (или эквивалентного короткого ответа).
-5. Проверьте `archive/YYYY/MM/DD/<turn-id>/input.wav`, transcript, metadata и Markdown-файл в `OBSIDIAN_INBOX`.
-
-Обычный запрос `Сколько будет два плюс два?` должен вернуть `Четыре.`, не создавать заметку, но всё равно создать архив voice turn.
-
-## Конфигурация
-
-Полный список переменных и их назначение находится в `.env.example` и [docs/development.md](docs/development.md). Ключевые настройки: bind host/port, archive, STT/Hermes/TTS URL, key/model/timeout, Obsidian vault/inbox, включение transcript в заметке, device token, Wi‑Fi, `VOICE_GATEWAY_URL`, `DEVICE_ID`, `MAX_RECORD_SECONDS`.
-
-## Тесты
-
-```bash
-# backend
-cd backend
-. .venv/bin/activate
-pytest
-
-# firmware hardware-independent/native tests
-cd ../firmware
-pio test -e native
-```
-
-Подробности, mock-провайдеры и acceptance-проверки: [docs/development.md](docs/development.md).
-
-## Ограничения MVP
-
-В MVP намеренно отсутствуют WireGuard, deep sleep, wake word, WebSocket и MP3/Opus/AAC. Аудио — PCM S16LE, 16 kHz, mono; передача ESP потоковая, без хранения полной записи в RAM. WireGuard и deep sleep — отдельный этап и не должны менять application protocol.
-
-## Документация
-
-- [Архитектура](docs/architecture.md)
-- [HTTP protocol](docs/protocol.md)
-- [Разработка, тесты и smoke tests](docs/development.md)
+- Backend сохраняет голосовые запросы и результаты в archive. Проверьте путь и политику хранения перед использованием с личными записями.
+- Codex provider и протокол v2 включаются явно. По умолчанию firmware использует v1, а gateway — Hermes.
+- Setup AP открыт и предназначен только для локальной настройки.
+- `.env`, Wi-Fi пароли, device tokens и Codex credentials нельзя коммитить.

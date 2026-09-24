@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from backend.src.voice_gateway.models import TTSResult
-from backend.src.voice_gateway.tts import TTSProvider, FakeTTS
+from backend.src.voice_gateway.tts import FakeTTS, TTSProvider
 
 
 @pytest.fixture()

@@ -65,6 +65,10 @@ class OpenAICompatibleSTT(STTProvider):
         """Transcribe the WAV file at ``wav`` (sync ABC method)."""
         return _run_sync(self._transcribe_async(wav))
 
+    async def transcribe_async(self, wav: Path) -> Transcript:
+        """Transcribe within an existing event loop without nesting loops."""
+        return await self._transcribe_async(wav)
+
     async def _transcribe_async(self, wav: Path) -> Transcript:
         try:
             data = Path(wav).read_bytes()
@@ -85,7 +89,8 @@ class OpenAICompatibleSTT(STTProvider):
                         _WAV_CONTENT_TYPE,
                     )
                 },
-                data={"model": self._config.model},
+                data={"model": self._config.model,
+                      "response_format": "verbose_json"},
                 headers=headers,
             )
         except httpx.HTTPError as exc:

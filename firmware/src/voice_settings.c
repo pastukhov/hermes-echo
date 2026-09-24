@@ -1,5 +1,6 @@
 #include "voice_settings.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #ifdef ESP_PLATFORM
@@ -15,9 +16,6 @@
 #endif
 #ifndef VOICE_GATEWAY_URL
 #define VOICE_GATEWAY_URL "http://192.168.1.10:8000/api/v1/voice/turn"
-#endif
-#ifndef VOICE_DEVICE_ID
-#define VOICE_DEVICE_ID "sticks3-01"
 #endif
 #ifndef VOICE_DEVICE_TOKEN
 #define VOICE_DEVICE_TOKEN ""
@@ -35,8 +33,14 @@ static void defaults(voice_settings_t *s) {
   copy_field(s->wifi_ssid, sizeof(s->wifi_ssid), VOICE_WIFI_SSID);
   copy_field(s->wifi_password, sizeof(s->wifi_password), VOICE_WIFI_PASSWORD);
   copy_field(s->gateway_url, sizeof(s->gateway_url), VOICE_GATEWAY_URL);
-  copy_field(s->device_id, sizeof(s->device_id), VOICE_DEVICE_ID);
   copy_field(s->device_token, sizeof(s->device_token), VOICE_DEVICE_TOKEN);
+}
+
+void voice_settings_set_device_id_from_mac(voice_settings_t *s,
+                                           const uint8_t mac[6]) {
+  if (!s || !mac) return;
+  snprintf(s->device_id, sizeof(s->device_id), "%02x%02x%02x%02x%02x%02x",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 #ifdef ESP_PLATFORM

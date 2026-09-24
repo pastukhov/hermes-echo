@@ -1,4 +1,5 @@
 #include "http_voice_client.h"
+#include "voice_http_chunk.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -6,6 +7,10 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 static const char *TAG = "voice_http";
+
+static int write_socket(void *context, const char *data, size_t length) {
+  return esp_http_client_write((esp_http_client_handle_t)context, data, (int)length);
+}
 
 static voice_transport_result_t begin(voice_transport_t *t) {
   http_voice_client_t *c = (http_voice_client_t *)t->ctx;
@@ -31,17 +36,18 @@ static voice_transport_result_t begin(voice_transport_t *t) {
 
 static voice_transport_write_result_t write_body(voice_transport_t *t, const uint8_t *data, size_t len) {
   http_voice_client_t *c = (http_voice_client_t *)t->ctx;
-  int n = esp_http_client_write(c->client, (const char *)data, (int)len);
-  if (n < 0) return (voice_transport_write_result_t){0, VOICE_TRANSPORT_FATAL};
-  if ((size_t)n < len) return (voice_transport_write_result_t){(size_t)n, VOICE_TRANSPORT_WOULD_BLOCK};
-  return (voice_transport_write_result_t){(size_t)n, VOICE_TRANSPORT_OK};
+  if (!voice_http_chunk_write(write_socket, c->client, data, len))
+    return (voice_transport_write_result_t){0, VOICE_TRANSPORT_FATAL};
+  return (voice_transport_write_result_t){len, VOICE_TRANSPORT_OK};
 }
 
 static voice_transport_result_t finish_body(voice_transport_t *t) {
   http_voice_client_t *c = (http_voice_client_t *)t->ctx;
+  if (!voice_http_chunk_finish(write_socket, c->client)) return VOICE_TRANSPORT_FATAL;
   int n = esp_http_client_fetch_headers(c->client);
   if (n < 0) return VOICE_TRANSPORT_FATAL;
   c->status_code = esp_http_client_get_status_code(c->client);
+  ESP_LOGI(TAG, "voice gateway HTTP %d", c->status_code);
   c->response_ready = 1;
   return VOICE_TRANSPORT_OK;
 }

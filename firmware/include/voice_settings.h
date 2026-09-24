@@ -2,6 +2,7 @@
 #define VOICE_SETTINGS_H
 
 #include <stddef.h>
+#include <stdint.h>
 #ifdef ESP_PLATFORM
 #include "esp_err.h"
 #else
@@ -20,5 +21,7 @@ typedef struct {
 
 esp_err_t voice_settings_load(voice_settings_t *settings);
 esp_err_t voice_settings_save(const voice_settings_t *settings);
+void voice_settings_set_device_id_from_mac(voice_settings_t *settings,
+                                           const uint8_t mac[6]);
 
 #endif

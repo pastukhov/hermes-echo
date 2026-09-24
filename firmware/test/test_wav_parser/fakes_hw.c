@@ -3,7 +3,6 @@
 #include <stdint.h>
 uint32_t hw_clock_ms(void) { return 0; }
 bool hw_button_raw(void) { return false; }
-void hw_led_write(uint16_t x) { (void)x; }
 bool hw_report_error(const char *x) { (void)x; return false; }
 void hw_audio_capture_start(void) {}
 void hw_audio_capture_stop(void) {}

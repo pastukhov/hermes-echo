@@ -7,25 +7,47 @@
 #include <lwip/sockets.h>
 
 #include "esp_http_server.h"
+#include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "voice_captive_dns.h"
+#include "voice_setup_access.h"
 
 static const char *TAG = "voice_httpd";
 static httpd_handle_t s_server;
 static voice_settings_t *s_settings;
+static char s_scan_json[2048] = "{\"ok\":false,\"scanning\":true,\"networks\":[]}";
+static volatile bool s_scan_ready;
+static volatile bool s_scan_running;
+static wifi_ap_record_t s_scan_records[24];
+static char s_scan_body[sizeof(s_scan_json)];
 
 /* The provisioning UI carries Wi-Fi credentials over plain HTTP. Keep it on
  * the device's setup subnet; do not expose it to the station/home LAN. */
 static bool allow_setup_client(httpd_req_t *req) {
-  struct sockaddr_in peer = {0};
+  struct sockaddr_storage peer = {0};
   socklen_t peer_len = sizeof(peer);
   int fd = httpd_req_to_sockfd(req);
-  if (fd < 0 || getpeername(fd, (struct sockaddr *)&peer, &peer_len) != 0 ||
-      peer.sin_family != AF_INET || (ntohl(peer.sin_addr.s_addr) & 0xffffff00U) != 0xc0a80400U) {
+  esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+  esp_netif_ip_info_t ap_ip = {0};
+  bool allowed = false;
+  if (ap) (void)esp_netif_get_ip_info(ap, &ap_ip);
+  if (fd >= 0 && ap_ip.ip.addr && ap_ip.netmask.addr &&
+      getpeername(fd, (struct sockaddr *)&peer, &peer_len) == 0) {
+    const uint8_t *address = NULL;
+    if (peer.ss_family == AF_INET) {
+      address = (const uint8_t *)&((const struct sockaddr_in *)&peer)->sin_addr;
+    } else if (peer.ss_family == AF_INET6) {
+      address = ((const struct sockaddr_in6 *)&peer)->sin6_addr.s6_addr;
+    }
+    allowed = voice_setup_ipv4_allowed(peer.ss_family, address,
+                                        ntohl(ap_ip.ip.addr), ntohl(ap_ip.netmask.addr));
+  }
+  if (!allowed) {
     httpd_resp_set_status(req, "403 Forbidden");
     httpd_resp_send(req, "setup network only", HTTPD_RESP_USE_STRLEN);
     return false;
@@ -46,14 +68,14 @@ static const char k_html[] =
   "</style></head><body><h1>🤖 Hermes StickS3 <span class='muted' id='ip'></span></h1>"
   "<div class='card'><div class='muted'>Network and voice gateway</div>"
   "<label>Wi‑Fi network</label><div class='row'><select id='scan'><option value=''>— scan networks —</option></select><button type='button' onclick='scanWifi()'>Scan</button></div>"
-  "<label>SSID</label><input id='ssid' autocomplete='off'><label>Password</label><input id='pass' type='password' placeholder='blank keeps saved password'>"
-  "<label>Gateway endpoint</label><input id='url' placeholder='http://192.168.1.10:8080/api/v1/voice/turn'>"
-  "<label>Device ID</label><input id='id'><label>Device token (optional)</label><input id='token' type='password' placeholder='blank keeps saved token'>"
+  "<label>SSID (required)</label><input id='ssid' autocomplete='off'><label>Password</label><input id='pass' type='password' placeholder='blank keeps saved password'>"
+  "<label>Gateway endpoint (required)</label><input id='url' placeholder='http://192.168.1.10:8080/api/v1/voice/turn'>"
+  "<label>Device token (optional)</label><input id='token' type='password' placeholder='blank keeps saved token'>"
   "<button class='save' onclick='saveCfg()'>Save &amp; Restart</button><div class='muted' id='info'></div></div>"
   "<div class='card'><b>Status</b><div id='status' class='muted' style='margin-top:6px'>loading…</div></div>"
-  "<script>const $=x=>document.getElementById(x);async function load(){try{const j=await (await fetch('/config')).json();$('ssid').value=j.wifi_ssid||'';$('url').value=j.gateway_url||'';$('id').value=j.device_id||'';$('ip').textContent=j.ip&&j.ip!=='0.0.0.0'?'· '+j.ip:'';$('status').textContent=j.wifi_connected?'Wi‑Fi connected · '+j.ip:'Setup access point · '+j.ap_ip;}catch(e){$('status').textContent='status unavailable';}}"
-  "async function scanWifi(){const sel=$('scan');sel.replaceChildren(new Option('scanning…',''));try{const j=await (await fetch('/wifi_scan')).json();sel.replaceChildren(new Option('— select network —',''));for(const n of (j.networks||[])){sel.add(new Option(n.ssid+' ('+n.rssi+' dBm)',n.ssid));}sel.onchange=()=>{if(sel.value)$('ssid').value=sel.value;};}catch(e){sel.replaceChildren(new Option('scan failed',''));}}"
-  "async function saveCfg(){const body=new URLSearchParams({wifi_ssid:$('ssid').value,wifi_password:$('pass').value,gateway_url:$('url').value,device_id:$('id').value,device_token:$('token').value});$('info').textContent='saving…';const r=await fetch('/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});$('info').textContent=r.ok?'saved; restarting…':'save failed';}load();setInterval(load,3000);</script></body></html>";
+  "<script>const $=x=>document.getElementById(x);async function load(){try{const j=await (await fetch('/config')).json();$('ssid').value=j.wifi_ssid||'';$('url').value=j.gateway_url||'';$('ip').textContent=j.ip&&j.ip!=='0.0.0.0'?'· '+j.ip:'';$('status').textContent=j.wifi_connected?'Wi‑Fi connected · '+j.ip:'Setup access point · '+j.ap_ip;}catch(e){$('status').textContent='status unavailable';}}"
+  "async function scanWifi(){const sel=$('scan');sel.replaceChildren(new Option('scanning…',''));try{const j=await (await fetch('/wifi_scan')).json();if(!j.ok&&j.scanning){setTimeout(scanWifi,1000);return;}if(!j.ok)throw new Error('scan failed');sel.replaceChildren(new Option('— select network —',''));for(const n of (j.networks||[])){sel.add(new Option(n.ssid+' ('+n.rssi+' dBm)',n.ssid));}sel.onchange=()=>{if(sel.value)$('ssid').value=sel.value;};}catch(e){sel.replaceChildren(new Option('scan failed',''));}}"
+  "async function saveCfg(){const ssid=$('ssid').value.trim(),url=$('url').value.trim();if(!ssid){$('info').textContent='Enter Wi-Fi network (SSID)';return;}if(!url){$('info').textContent='Enter Gateway endpoint';return;}if(!url.startsWith('http://')&&!url.startsWith('https://')){$('info').textContent='Gateway endpoint must start with http:// or https://';return;}const body=new URLSearchParams({wifi_ssid:ssid,wifi_password:$('pass').value,gateway_url:url,device_token:$('token').value});$('info').textContent='saving…';const r=await fetch('/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});$('info').textContent=r.ok?'saved; restarting…':'save failed';}load();scanWifi();</script></body></html>";
 
 static esp_err_t send_json(httpd_req_t *req, const char *body) {
   httpd_resp_set_type(req, "application/json");
@@ -96,6 +118,17 @@ static esp_err_t h_root(httpd_req_t *req) {
   if (!allow_setup_client(req)) return ESP_OK;
   httpd_resp_set_type(req, "text/html; charset=utf-8");
   return httpd_resp_send(req, k_html, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t h_portal_redirect(httpd_req_t *req, httpd_err_code_t error) {
+  (void)error;
+  if (!allow_setup_client(req)) return ESP_OK;
+  httpd_resp_set_status(req, "302 Found");
+  httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  return httpd_resp_send(req,
+      "<html><body><a href='http://192.168.4.1/'>Open Hermes StickS3 setup</a></body></html>",
+      HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t h_config_get(httpd_req_t *req) {
@@ -165,7 +198,6 @@ static bool parse_config_form(char *body, voice_settings_t *next) {
       if (strcmp(key, "wifi_ssid") == 0) { dst = next->wifi_ssid; cap = sizeof(next->wifi_ssid); }
       else if (strcmp(key, "wifi_password") == 0) { dst = next->wifi_password; cap = sizeof(next->wifi_password); }
       else if (strcmp(key, "gateway_url") == 0) { dst = next->gateway_url; cap = sizeof(next->gateway_url); }
-      else if (strcmp(key, "device_id") == 0) { dst = next->device_id; cap = sizeof(next->device_id); }
       else if (strcmp(key, "device_token") == 0) { dst = next->device_token; cap = sizeof(next->device_token); }
       /* Empty secret fields mean "keep the saved secret" in this UI. */
       if (dst && !((strcmp(key, "wifi_password") == 0 || strcmp(key, "device_token") == 0) && !value[0]) &&
@@ -204,30 +236,64 @@ static esp_err_t h_config_post(httpd_req_t *req) {
 
 static esp_err_t h_wifi_scan(httpd_req_t *req) {
   if (!allow_setup_client(req)) return ESP_OK;
+  char body[sizeof(s_scan_json)];
+  strlcpy(body, s_scan_ready ? s_scan_json :
+          "{\"ok\":false,\"scanning\":true,\"networks\":[]}", sizeof(body));
+  ESP_LOGI(TAG, "wifi scan cache request: ready=%d bytes=%u", (int)s_scan_ready,
+           (unsigned)strlen(body));
+  return send_json(req, body);
+}
+
+static void wifi_scan_task(void *arg) {
+  (void)arg;
+  vTaskDelay(pdMS_TO_TICKS(500));
+  esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+  esp_err_t dns_err = voice_captive_dns_start(ap);
+  if (dns_err != ESP_OK)
+    ESP_LOGE(TAG, "captive DNS start failed: %s", esp_err_to_name(dns_err));
   wifi_mode_t mode = WIFI_MODE_NULL;
-  if (esp_wifi_get_mode(&mode) != ESP_OK) return send_json(req, "{\"ok\":false,\"networks\":[]}");
-  if (mode == WIFI_MODE_AP && esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK)
-    return send_json(req, "{\"ok\":false,\"networks\":[]}");
-  wifi_scan_config_t cfg = {0};
-  esp_err_t err = esp_wifi_scan_start(&cfg, true);
-  if (err != ESP_OK) return send_json(req, "{\"ok\":false,\"networks\":[]}");
-  uint16_t count = 24; wifi_ap_record_t records[24];
-  if (esp_wifi_scan_get_ap_records(&count, records) != ESP_OK)
-    return send_json(req, "{\"ok\":false,\"networks\":[]}");
-  char body[2048]; size_t used = 0; used += (size_t)snprintf(body, sizeof(body), "{\"ok\":true,\"networks\":[");
+  esp_err_t err = esp_wifi_get_mode(&mode);
+  if (err == ESP_OK && mode != WIFI_MODE_APSTA) err = ESP_ERR_INVALID_STATE;
+  if (err == ESP_OK) {
+    wifi_scan_config_t cfg = {0};
+    err = esp_wifi_scan_start(&cfg, true);
+  }
+  uint16_t count = 24;
+  if (err == ESP_OK) err = esp_wifi_scan_get_ap_records(&count, s_scan_records);
+  char *body = s_scan_body;
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "startup Wi-Fi scan failed: %s", esp_err_to_name(err));
+    snprintf(body, sizeof(s_scan_body), "{\"ok\":false,\"scanning\":false,\"networks\":[]}");
+  } else {
+    size_t used = (size_t)snprintf(body, sizeof(s_scan_body), "{\"ok\":true,\"scanning\":false,\"networks\":[");
   bool first = true;
-  for (uint16_t i = 0; i < count && used < sizeof(body) - 96; ++i) {
-    if (!records[i].ssid[0]) continue;
-    int n = snprintf(body + used, sizeof(body) - used, "%s{\"ssid\":", first ? "" : ",");
-    if (n < 0 || (size_t)n >= sizeof(body) - used) break;
+    for (uint16_t i = 0; i < count && used < sizeof(s_scan_body) - 96; ++i) {
+    if (!s_scan_records[i].ssid[0]) continue;
+    int n = snprintf(body + used, sizeof(s_scan_body) - used, "%s{\"ssid\":", first ? "" : ",");
+    if (n < 0 || (size_t)n >= sizeof(s_scan_body) - used) break;
     used += (size_t)n;
-    if (!json_string(body, sizeof(body), &used, (const char *)records[i].ssid)) break;
-    n = snprintf(body + used, sizeof(body) - used, ",\"rssi\":%d}", records[i].rssi);
-    if (n < 0 || (size_t)n >= sizeof(body) - used) break;
+    if (!json_string(body, sizeof(s_scan_body), &used, (const char *)s_scan_records[i].ssid)) break;
+    n = snprintf(body + used, sizeof(s_scan_body) - used, ",\"rssi\":%d}", s_scan_records[i].rssi);
+    if (n < 0 || (size_t)n >= sizeof(s_scan_body) - used) break;
     used += (size_t)n; first = false;
   }
-  snprintf(body + used, sizeof(body) - used, "]}");
-  return send_json(req, body);
+    snprintf(body + used, sizeof(s_scan_body) - used, "]}");
+    ESP_LOGI(TAG, "startup Wi-Fi scan complete: %u networks", (unsigned)count);
+  }
+  strlcpy(s_scan_json, body, sizeof(s_scan_json));
+  s_scan_ready = true;
+  s_scan_running = false;
+  vTaskDelete(NULL);
+}
+
+void voice_config_httpd_setup_ap_started(void) {
+  if (!s_server || s_scan_running) return;
+  s_scan_ready = false;
+  s_scan_running = true;
+  if (xTaskCreate(wifi_scan_task, "wifi_scan", 4096, NULL, 3, NULL) != pdPASS) {
+    s_scan_running = false;
+    ESP_LOGE(TAG, "startup Wi-Fi scan task creation failed");
+  }
 }
 
 void voice_config_httpd_start(voice_settings_t *settings) {
@@ -235,6 +301,7 @@ void voice_config_httpd_start(voice_settings_t *settings) {
   s_settings = settings;
   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
   cfg.server_port = 80;
+  cfg.stack_size = 8192;
   if (httpd_start(&s_server, &cfg) != ESP_OK) { ESP_LOGE(TAG, "HTTP server start failed"); return; }
   static const httpd_uri_t root = {.uri = "/", .method = HTTP_GET, .handler = h_root};
   static const httpd_uri_t get_cfg = {.uri = "/config", .method = HTTP_GET, .handler = h_config_get};
@@ -242,8 +309,13 @@ void voice_config_httpd_start(voice_settings_t *settings) {
   static const httpd_uri_t scan = {.uri = "/wifi_scan", .method = HTTP_GET, .handler = h_wifi_scan};
   httpd_register_uri_handler(s_server, &root); httpd_register_uri_handler(s_server, &get_cfg);
   httpd_register_uri_handler(s_server, &post_cfg); httpd_register_uri_handler(s_server, &scan);
+  httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, h_portal_redirect);
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  if (esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_APSTA)
+    voice_config_httpd_setup_ap_started();
   ESP_LOGI(TAG, "settings UI started on port 80");
 }
 #else
 void voice_config_httpd_start(voice_settings_t *settings) { (void)settings; }
+void voice_config_httpd_setup_ap_started(void) {}
 #endif

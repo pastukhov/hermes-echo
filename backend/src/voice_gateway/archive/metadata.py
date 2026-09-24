@@ -4,8 +4,9 @@ One voice turn keeps a single ``metadata.json``. On success it records the
 full turn summary (transcript, reply, note, status); on failure the metadata
 is still saved with the failure status and a sanitized error string.
 """
-from pydantic import BaseModel, ConfigDict, Field
 from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TurnMetadata(BaseModel):

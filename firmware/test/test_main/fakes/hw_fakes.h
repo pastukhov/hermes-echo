@@ -5,7 +5,7 @@
 
 /*
  * Host fake for the hardware seam. Records every call so tests can assert
- * exactly what the state machine did to the button/LED/audio hardware.
+ * exactly what the state machine did to the button/audio hardware.
  */
 
 /* Bytes the capture fake hands back per hw_audio_capture_read() call, once
@@ -16,8 +16,6 @@
 typedef struct {
   uint32_t clock_ms;
   bool button_raw;
-  uint16_t led_rgb565;
-  int led_writes;
   int button_reads;
   int error_reports;
   const char* last_error;

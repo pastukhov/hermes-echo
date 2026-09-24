@@ -197,3 +197,4 @@ class FilesystemArchiveStore(ArchiveStore):
             pcm.flush()
         finally:
             pcm.close()
+

@@ -34,7 +34,7 @@ ES8311 audio codec pins specified task
 #define BOARD_BUTTON_PIN BOARD_KEY1_GPIO
 #define BOARD_BUTTON_ACTIVE_LOW 1
 
-/* LCD (used as LED via hw_led_write) */
+/* LCD status display */
 #define BOARD_LCD_SCLK_GPIO 40
 #define BOARD_LCD_MOSI_GPIO 39
 #define BOARD_LCD_CS_GPIO 41
@@ -44,8 +44,9 @@ ES8311 audio codec pins specified task
 
 /* Credentials are intentionally supplied at build/runtime, never committed. */
 bool board_sticks3_wifi_start(const char *ssid, const char *password);
-bool board_sticks3_wifi_start_ap(const char *ssid);
+bool board_sticks3_wifi_start_ap(void);
 void board_sticks3_log_memory(void);
+void board_sticks3_display_set_device_id(const char *device_id);
 void board_sticks3_display_update(state_t state, uint32_t now_ms);
 
 #endif

@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from backend.src.voice_gateway.archive import (
     METADATA_FILENAME,
-    ArchiveStore,
+    MetadataArchiveStore,
     TurnMetadata,
     atomic_write_bytes,
     atomic_write_json,
@@ -148,11 +148,11 @@ class TestAtomicWriteMetadata(unittest.TestCase):
         )
 
 
-class TestArchiveStore(unittest.TestCase):
+class TestMetadataArchiveStore(unittest.TestCase):
     def setUp(self):
         self._tmp = _tmpdir()
         self.dir = Path(self._tmp.name)
-        self.store = ArchiveStore(root=self.dir)
+        self.store = MetadataArchiveStore(root=self.dir)
 
     def tearDown(self):
         self._tmp.cleanup()

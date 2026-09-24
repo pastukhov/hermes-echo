@@ -4,5 +4,6 @@
 #include "voice_settings.h"
 
 void voice_config_httpd_start(voice_settings_t *settings);
+void voice_config_httpd_setup_ap_started(void);
 
 #endif

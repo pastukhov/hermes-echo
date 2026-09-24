@@ -40,11 +40,6 @@ bool hw_button_raw(void) {
   return g_hw_fake.button_raw;
 }
 
-void hw_led_write(uint16_t rgb565) {
-  g_hw_fake.led_rgb565 = rgb565;
-  g_hw_fake.led_writes++;
-}
-
 bool hw_report_error(const char* what) {
   g_hw_fake.error_reports++;
   g_hw_fake.last_error = what;

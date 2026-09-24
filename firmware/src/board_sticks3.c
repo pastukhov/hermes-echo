@@ -3,6 +3,12 @@
 #include "audio_capture.h"
 #include "audio_playback.h"
 #include "screen_ui.h"
+#include "screen_font.h"
+#include "voice_config_httpd.h"
+#include "voice_wifi_setup.h"
+
+#include <stdio.h>
+#include <string.h>
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -26,6 +32,11 @@ static bool s_lcd_ready;
 static bool s_wifi_initialized;
 static bool s_wifi_handlers_registered;
 static bool s_wifi_connected;
+static volatile bool s_sta_associated;
+static bool s_wifi_has_credentials;
+static voice_wifi_setup_t s_wifi_setup;
+static char s_setup_ssid[33];
+static TaskHandle_t s_wifi_manager_task;
 static esp_netif_t *s_wifi_sta_netif;
 static esp_netif_t *s_wifi_ap_netif;
 static uint16_t *s_screen;
@@ -33,13 +44,18 @@ static state_t s_screen_state = (state_t)-1;
 static int s_screen_phase = -1;
 static bool s_screen_wifi;
 static bool s_screen_timing_reported;
+static char s_screen_device_id[16];
+static bool wifi_init_once(bool need_sta, bool need_ap);
 
 static void wifi_event_handler(void *arg, esp_event_base_t base,
                                int32_t event_id, void *event_data) {
   (void)arg;
   if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
     ESP_LOGI(TAG, "Wi-Fi STA started");
+  } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
+    s_sta_associated = true;
   } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    s_sta_associated = false;
     s_wifi_connected = false;
     ESP_LOGW(TAG, "Wi-Fi disconnected");
   } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -47,6 +63,84 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     s_wifi_connected = true;
     ESP_LOGI(TAG, "Wi-Fi got IP: " IPSTR, IP2STR(&event->ip_info.ip));
   }
+}
+
+static void wifi_manager(void *arg) {
+  (void)arg;
+  uint32_t last_connect_attempt_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+  for (;;) {
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    voice_wifi_setup_set_connected(&s_wifi_setup, s_wifi_connected, now_ms);
+    if (voice_wifi_setup_should_stop_ap(&s_wifi_setup)) {
+      esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+      if (err == ESP_OK) {
+        voice_wifi_setup_set_ap_active(&s_wifi_setup, false);
+        ESP_LOGI(TAG, "Home Wi-Fi connected; setup AP stopped");
+      } else {
+        ESP_LOGE(TAG, "Failed to stop setup AP: %s", esp_err_to_name(err));
+      }
+    } else if (voice_wifi_setup_should_start_ap(&s_wifi_setup, now_ms)) {
+      esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+      if (err == ESP_OK) {
+        voice_wifi_setup_set_ap_active(&s_wifi_setup, true);
+        ESP_LOGI(TAG, "Setup AP started after Wi-Fi timeout: SSID=%s", s_setup_ssid);
+        voice_config_httpd_setup_ap_started();
+      } else {
+        ESP_LOGE(TAG, "Failed to start setup AP: %s", esp_err_to_name(err));
+      }
+    }
+    if (s_wifi_has_credentials && !s_wifi_connected && !s_sta_associated &&
+        (uint32_t)(now_ms - last_connect_attempt_ms) >= 5000U) {
+      esp_err_t err = esp_wifi_connect();
+      if (err != ESP_OK && err != ESP_ERR_WIFI_CONN)
+        ESP_LOGW(TAG, "Wi-Fi retry failed: %s", esp_err_to_name(err));
+      last_connect_attempt_ms = now_ms;
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+}
+
+static bool wifi_start_with_setup(const char *ssid, const char *password,
+                                  bool configured) {
+  if (!wifi_init_once(true, true)) return false;
+  if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) return false;
+  uint8_t mac[6];
+  if (esp_wifi_get_mac(WIFI_IF_STA, mac) != ESP_OK ||
+      !voice_wifi_setup_ssid(s_setup_ssid, sizeof(s_setup_ssid), mac)) return false;
+  wifi_config_t ap = {0};
+  strncpy((char *)ap.ap.ssid, s_setup_ssid, sizeof(ap.ap.ssid) - 1);
+  ap.ap.ssid_len = (uint8_t)strlen(s_setup_ssid);
+  ap.ap.authmode = WIFI_AUTH_OPEN;
+  ap.ap.max_connection = 4;
+  /* Configure both interfaces before start; switch to STA-only before
+   * broadcasting when saved credentials exist. */
+  if (esp_wifi_set_config(WIFI_IF_AP, &ap) != ESP_OK) return false;
+  if (configured) {
+    wifi_config_t sta = {0};
+    strncpy((char *)sta.sta.ssid, ssid, sizeof(sta.sta.ssid) - 1);
+    strncpy((char *)sta.sta.password, password, sizeof(sta.sta.password) - 1);
+    if (esp_wifi_set_config(WIFI_IF_STA, &sta) != ESP_OK ||
+        esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) return false;
+  }
+  voice_wifi_setup_init(&s_wifi_setup, configured,
+                        (uint32_t)(esp_timer_get_time() / 1000ULL));
+  voice_wifi_setup_set_ap_active(&s_wifi_setup, !configured);
+  s_wifi_has_credentials = configured;
+  s_wifi_connected = false;
+  s_sta_associated = false;
+  esp_err_t err = esp_wifi_start();
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return false;
+  if (configured) {
+    err = esp_wifi_connect();
+    if (err != ESP_OK) ESP_LOGW(TAG, "Initial Wi-Fi connect: %s", esp_err_to_name(err));
+    if (!s_wifi_manager_task &&
+        xTaskCreate(wifi_manager, "wifi_manager", 4096, NULL, 4,
+                    &s_wifi_manager_task) != pdPASS) return false;
+    ESP_LOGI(TAG, "Wi-Fi STA started; setup AP will start after 60s if needed");
+  } else {
+    ESP_LOGI(TAG, "Setup AP started: SSID=%s, IP=192.168.4.1", s_setup_ssid);
+  }
+  return true;
 }
 
 static bool wifi_init_once(bool need_sta, bool need_ap) {
@@ -97,11 +191,20 @@ static void init_m5pm1(void) {
   i2c_device_config_t dc = {.dev_addr_length = I2C_ADDR_BIT_LEN_7,
     .device_address = 0x6e, .scl_speed_hz = 100000};
   if (i2c_master_bus_add_device(bus, &dc, &dev) != ESP_OK) { i2c_del_master_bus(bus); return; }
-  uint8_t cfg[] = {0x09, 0x00}; i2c_master_transmit(dev, cfg, sizeof(cfg), 200);
-  uint8_t dir[] = {0x10, 0x0c}; i2c_master_transmit(dev, dir, sizeof(dir), 200);
-  uint8_t out[] = {0x11, 0x0c}; i2c_master_transmit(dev, out, sizeof(out), 200);
+  uint8_t cfg[] = {0x09, 0x00};
+  esp_err_t err = i2c_master_transmit(dev, cfg, sizeof(cfg), 200);
+  const uint8_t regs[] = {0x16, 0x13, 0x10, 0x11};
+  for (size_t i = 0; i < sizeof(regs) && err == ESP_OK; ++i) {
+    uint8_t value = 0;
+    err = i2c_master_transmit_receive(dev, &regs[i], 1, &value, 1, 200);
+    if (err != ESP_OK) break;
+    value = i < 2 ? (uint8_t)(value & ~0x0c) : (uint8_t)(value | 0x0c);
+    uint8_t write[] = {regs[i], value};
+    err = i2c_master_transmit(dev, write, sizeof(write), 200);
+  }
   i2c_master_bus_rm_device(dev); i2c_del_master_bus(bus);
-  ESP_LOGI(TAG, "M5PM1 LCD and speaker rails enabled");
+  if (err == ESP_OK) ESP_LOGI(TAG, "M5PM1 LCD and speaker rails enabled");
+  else ESP_LOGE(TAG, "M5PM1 rail setup failed: %s", esp_err_to_name(err));
 }
 
 static void lcd_cmd(uint8_t cmd) {
@@ -137,16 +240,6 @@ static void lcd_init(void) {
   lcd_cmd(0x21); /* M5StickS3 panel requires inversion. */
   lcd_cmd(0x29); gpio_set_level(BOARD_LCD_BL_GPIO, 1); s_lcd_ready = true;
 }
-static void lcd_fill(uint16_t color) {
-  lcd_init();
-  uint8_t area[4] = {0, 52, 0, 186}; lcd_cmd(0x2A); lcd_data(area, 4);
-  area[0] = 0; area[1] = 40; area[2] = 1; area[3] = 23; lcd_cmd(0x2B); lcd_data(area, 4);
-  lcd_cmd(0x2C);
-  uint8_t line[270];
-  for (size_t i = 0; i < sizeof(line); i += 2) { line[i] = color >> 8; line[i + 1] = color & 0xff; }
-  for (int y = 0; y < 240; ++y) lcd_data(line, sizeof(line));
-}
-
 #define SCREEN_W 135
 #define SCREEN_H 240
 #define C_BG 0x0083
@@ -155,51 +248,6 @@ static void lcd_fill(uint16_t color) {
 #define C_WHITE 0xEF9F
 #define C_LINE 0x1988
 
-static const uint8_t FONT5X7[26][7] = {
-  {14,17,17,31,17,17,17},{30,17,17,30,17,17,30},{14,17,16,16,16,17,14},
-  {30,17,17,17,17,17,30},{31,16,16,30,16,16,31},{31,16,16,30,16,16,16},
-  {14,17,16,23,17,17,15},{17,17,17,31,17,17,17},{14,4,4,4,4,4,14},
-  {7,2,2,2,18,18,12},{17,18,20,24,20,18,17},{16,16,16,16,16,16,31},
-  {17,27,21,21,17,17,17},{17,25,21,19,17,17,17},{14,17,17,17,17,17,14},
-  {30,17,17,30,16,16,16},{14,17,17,17,21,18,13},{30,17,17,30,20,18,17},
-  {15,16,16,14,1,1,30},{31,4,4,4,4,4,4},{17,17,17,17,17,17,14},
-  {17,17,17,17,17,10,4},{17,17,17,21,21,21,10},{17,17,10,4,10,17,17},
-  {17,17,10,4,4,4,4},{31,1,2,4,8,16,31}
-};
-static const uint8_t FONT_CYRILLIC_5X7[32][7] = {
-  {14,17,17,31,17,17,17}, {30,17,17,30,17,17,30}, {30,17,17,30,17,17,30},
-  {31,16,16,16,16,16,16}, {6,10,10,10,18,31,17}, {31,16,16,30,16,16,31},
-  {21,21,14,4,14,21,21}, {14,17,1,6,1,17,14}, {15,16,16,14,1,1,30},
-  {4,10,0,19,21,25,17}, {17,18,20,24,20,18,17}, {16,16,16,16,16,16,31},
-  {7,9,9,9,17,17,17}, {17,27,21,21,17,17,17}, {17,25,21,19,17,17,17},
-  {31,17,17,17,17,17,17}, {30,17,17,30,16,16,16}, {14,17,16,16,16,17,14},
-  {31,4,4,4,4,4,4}, {17,17,10,4,4,8,16}, {4,14,21,21,21,14,4},
-  {17,17,10,4,10,17,17}, {17,17,17,17,17,31,1}, {17,17,17,15,1,1,1},
-  {21,21,21,21,21,21,31}, {21,21,21,21,21,31,1}, {24,8,8,14,9,9,14},
-  {17,17,25,21,21,25,17}, {16,16,30,17,17,17,30}, {14,17,1,7,1,17,14},
-  {17,21,21,29,21,21,17}, {15,17,17,15,5,9,17}
-};
-
-static uint32_t screen_utf8_next(const char **text) {
-  const uint8_t *p = (const uint8_t *)*text;
-  uint32_t cp;
-  if (p[0] < 0x80) { ++*text; return p[0]; }
-  if ((p[0] & 0xE0) == 0xC0) {
-    cp = ((uint32_t)(p[0] & 0x1F) << 6) | (p[1] & 0x3F); *text += 2;
-  } else if ((p[0] & 0xF0) == 0xE0) {
-    cp = ((uint32_t)(p[0] & 0x0F) << 12) | ((uint32_t)(p[1] & 0x3F) << 6) | (p[2] & 0x3F); *text += 3;
-  } else { ++*text; return '?'; }
-  return cp;
-}
-
-static const uint8_t *screen_glyph(uint32_t cp) {
-  if (cp >= 'a' && cp <= 'z') cp -= 'a' - 'A';
-  if (cp >= 'A' && cp <= 'Z') return FONT5X7[cp - 'A'];
-  if (cp == 0x0401 || cp == 0x0451) cp = 0x0415; /* Ё/ё */
-  if (cp >= 0x0430 && cp <= 0x044F) cp -= 0x20;
-  if (cp >= 0x0410 && cp <= 0x042F) return FONT_CYRILLIC_5X7[cp - 0x0410];
-  return NULL;
-}
 
 static void screen_pixel(int x, int y, uint16_t color) {
   if (!s_screen || x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) return;
@@ -217,20 +265,22 @@ static void screen_circle(int cx, int cy, int radius, uint16_t color) {
       if (x * x + y * y <= radius * radius) screen_pixel(cx + x, cy + y, color);
 }
 
-static void screen_text(const char *text, int x, int y, int scale, uint16_t color) {
-  int width = 0;
-  const char *count = text;
-  while (*count) { (void)screen_utf8_next(&count); width += 6 * scale; }
-  x -= width / 2;
-  while (*text) {
-    uint32_t cp = screen_utf8_next(&text);
-    const uint8_t *rows = screen_glyph(cp);
-    if (!rows) { x += 6 * scale; continue; }
-    for (int row = 0; row < 7; ++row)
-      for (int col = 0; col < 5; ++col)
-        if (rows[row] & (1U << (4 - col))) screen_rect(x + col * scale, y + row * scale, scale, scale, color);
-    x += 6 * scale;
+static void screen_hint(const char *hint) {
+  const char *newline = strchr(hint, '\n');
+  if (!newline) {
+    screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 67, 184,
+                              SCREEN_FONT_HINT, hint, C_MUTED);
+    return;
   }
+  char first[48];
+  size_t length = (size_t)(newline - hint);
+  if (length >= sizeof(first)) return;
+  memcpy(first, hint, length);
+  first[length] = '\0';
+  screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 67, 181,
+                            SCREEN_FONT_HINT, first, C_MUTED);
+  screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 67, 196,
+                            SCREEN_FONT_HINT, newline + 1, C_MUTED);
 }
 
 static void screen_wifi_icon(bool connected) {
@@ -298,6 +348,12 @@ static void screen_flush(void) {
   }
 }
 
+void board_sticks3_display_set_device_id(const char *device_id) {
+  snprintf(s_screen_device_id, sizeof(s_screen_device_id), "ID %s",
+           device_id ? device_id : "");
+  s_screen_state = (state_t)-1;
+}
+
 void board_sticks3_display_update(state_t state, uint32_t now_ms) {
   int phase = (int)(now_ms / 180U);
   if (state == s_screen_state && phase == s_screen_phase && s_wifi_connected == s_screen_wifi) return;
@@ -307,14 +363,18 @@ void board_sticks3_display_update(state_t state, uint32_t now_ms) {
   lcd_init();
   screen_ui_view_t view = screen_ui_view(state);
   for (int i = 0; i < SCREEN_W * SCREEN_H; ++i) s_screen[i] = C_BG;
-  screen_text("ГЕРМЕС", 42, 13, 1, C_WHITE);
+  screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 42, 13,
+                            SCREEN_FONT_SMALL, "ГЕРМЕС", C_WHITE);
   screen_wifi_icon(s_wifi_connected);
   screen_rect(10, 32, 115, 1, C_LINE);
   screen_draw_icon(view, phase);
-  screen_text(view.title, 67, 158, 2, C_WHITE);
-  screen_text(view.hint, 67, 184, 1, C_MUTED);
+  screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 67, 155,
+                            SCREEN_FONT_TITLE, view.title, C_WHITE);
+  screen_hint(view.hint);
   screen_rect(45, 216, 45, 1, C_LINE);
-  screen_text("ГОЛОСОВОЙ ТЕРМИНАЛ", 67, 222, 1, C_MUTED);
+  screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 67, 222,
+                            SCREEN_FONT_SMALL,
+                            s_screen_device_id[0] ? s_screen_device_id : "ГЕРМЕС", C_MUTED);
   int64_t render_start_us = esp_timer_get_time();
   screen_flush();
   if (!s_screen_timing_reported) {
@@ -337,42 +397,11 @@ void board_sticks3_log_memory(void) {
 
 bool board_sticks3_wifi_start(const char *ssid, const char *password) {
   if (!ssid || !ssid[0] || !password) return false;
-  if (!wifi_init_once(true, true)) return false;
-  wifi_config_t cfg = {0};
-  strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid) - 1);
-  strncpy((char *)cfg.sta.password, password, sizeof(cfg.sta.password) - 1);
-  wifi_config_t ap = {0};
-  const char *setup_ssid = "Hermes-StickS3-Setup";
-  strncpy((char *)ap.ap.ssid, setup_ssid, sizeof(ap.ap.ssid) - 1);
-  ap.ap.ssid_len = (uint8_t)strlen(setup_ssid);
-  ap.ap.authmode = WIFI_AUTH_OPEN;
-  ap.ap.max_connection = 4;
-  esp_err_t start_err;
-  if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK ||
-      esp_wifi_set_config(WIFI_IF_AP, &ap) != ESP_OK ||
-      esp_wifi_set_config(WIFI_IF_STA, &cfg) != ESP_OK) return false;
-  start_err = esp_wifi_start();
-  if (start_err != ESP_OK && start_err != ESP_ERR_INVALID_STATE) return false;
-  if (esp_wifi_connect() != ESP_OK) return false;
-  ESP_LOGI(TAG, "Wi-Fi station and setup AP start requested");
-  return true;
+  return wifi_start_with_setup(ssid, password, true);
 }
 
-bool board_sticks3_wifi_start_ap(const char *ssid) {
-  if (!ssid || !ssid[0]) ssid = "Hermes-StickS3-Setup";
-  if (!wifi_init_once(true, true)) return false;
-  wifi_config_t cfg = {0};
-  strncpy((char *)cfg.ap.ssid, ssid, sizeof(cfg.ap.ssid) - 1);
-  cfg.ap.ssid_len = (uint8_t)strlen((char *)cfg.ap.ssid);
-  cfg.ap.authmode = WIFI_AUTH_OPEN;
-  cfg.ap.max_connection = 4;
-  esp_err_t start_err;
-  if (esp_wifi_set_mode(WIFI_MODE_AP) != ESP_OK ||
-      esp_wifi_set_config(WIFI_IF_AP, &cfg) != ESP_OK) return false;
-  start_err = esp_wifi_start();
-  if (start_err != ESP_OK && start_err != ESP_ERR_INVALID_STATE) return false;
-  ESP_LOGI(TAG, "Setup AP started: SSID=%s, IP=192.168.4.1", ssid);
-  return true;
+bool board_sticks3_wifi_start_ap(void) {
+  return wifi_start_with_setup(NULL, NULL, false);
 }
 
 uint32_t hw_clock_ms(void) {
@@ -394,13 +423,6 @@ bool hw_button_raw(void) {
   return gpio_get_level(BOARD_BUTTON_PIN) == 0;
 }
 
-void hw_led_write(uint16_t rgb565) {
-  static uint16_t last = 0xffff;
-  if (last == rgb565 && s_lcd_ready) return;
-  last = rgb565;
-  lcd_fill(rgb565);
-}
-
 bool hw_report_error(const char *what) {
   ESP_LOGE(TAG, "hardware error: %s", what ? what : "(null)");
   return false;
@@ -413,7 +435,7 @@ static void ensure_audio(void) {
     .buffer_frame_size = 512, .queue_size = 8
   };
   const audio_playback_config_t play = {
-    .sample_rate = 16000, .bits_per_sample = 16, .channel_count = 1,
+    .sample_rate = 24000, .bits_per_sample = 16, .channel_count = 1,
     .buffer_frame_size = 512, .queue_size = 8
   };
   if (audio_capture_init(&cap) != ESP_OK ||
@@ -439,7 +461,7 @@ void hw_audio_playback_start(const void *data, size_t size) {
 }
 void hw_audio_playback_stop(void) { (void)audio_playback_stop(); }
 size_t hw_audio_playback_write(const uint8_t *buf, size_t size) {
-  return audio_playback_write(buf, size, 0) == ESP_OK ? size : 0;
+  return audio_playback_write(buf, size, 1000) == ESP_OK ? size : 0;
 }
 bool hw_audio_playback_drained(void) {
   return audio_playback_get_buffer_level() == 0;

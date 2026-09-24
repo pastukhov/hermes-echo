@@ -31,20 +31,30 @@ from prometheus_client import generate_latest
 from backend.common.error_codes import ErrorCode
 from backend.src.voice_gateway.health import check_live, check_ready
 from backend.src.voice_gateway.archive import (
-    ArchiveStore,
+    MetadataArchiveStore,
     atomic_write_bytes,
     atomic_write_json,
 )
-from backend.src.voice_gateway.config import STTConfig, STTConfigError
+from backend.src.voice_gateway.config import (
+    HermesConfig,
+    HermesConfigError,
+    STTConfig,
+    STTConfigError,
+    load_hermes_prompt,
+)
 from backend.src.voice_gateway.hermes.base import HermesClient
+from backend.src.voice_gateway.hermes.client import OpenAICompatibleHermesClient
 from backend.src.voice_gateway.hermes.stage import (
     HermesStage,
     HermesStageError,
     last_raw_response,
 )
 from backend.src.voice_gateway.metrics import init_metrics
-from backend.src.voice_gateway.stt.base import STTProvider
+from backend.src.voice_gateway.stt.base import STTClientError, STTProvider
 from backend.src.voice_gateway.stt.client import OpenAICompatibleSTT
+from backend.src.voice_gateway.tts.base import TTSProvider, TTSProviderError
+from backend.src.voice_gateway.tts.config import TTSConfig
+from backend.src.voice_gateway.tts.openai_compatible import OpenAICompatibleTTS
 
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
@@ -75,6 +85,23 @@ def _default_stt_provider() -> STTProvider | None:
     return OpenAICompatibleSTT(config)
 
 
+def _default_hermes_client() -> HermesClient | None:
+    try:
+        config = HermesConfig.from_env()
+        prompt = load_hermes_prompt()
+    except HermesConfigError:
+        return None
+    return OpenAICompatibleHermesClient(config, system_prompt=prompt)
+
+
+def _default_tts_provider() -> TTSProvider | None:
+    try:
+        config = TTSConfig.from_env(os.environ)
+    except ValueError:
+        return None
+    return OpenAICompatibleTTS(config)
+
+
 def pcm_to_wav(pcm_path: Path, wav_path: Path, sample_rate: int, channels: int) -> None:
     """Wrap a raw PCM S16LE file in a minimal WAV header.
 
@@ -103,18 +130,16 @@ def create_app(
     archive_root: str | os.PathLike | None = None,
     stt: STTProvider | None = None,
     hermes: HermesClient | None = None,
+    tts: TTSProvider | None = None,
 ) -> FastAPI:
     """Build the gateway app.
 
     ``archive_root`` defaults to ``$ARCHIVE_ROOT`` or ``./archive`` (tests
     pass a tmp dir). ``stt`` / ``hermes`` are optional provider
-    dependencies injected by the caller (tests pass fakes explicitly). When
-    ``stt`` is left ``None`` the production STTProvider is built from
-    environment config (ТЗ §20, ``_default_stt_provider()``); when neither
-    an env-configured endpoint nor an injected fake is available, STT is
-    simply not run. ``hermes`` has no such env-based default (wiring it in
-    is a separate card's concern) — Hermes only runs when explicitly
-    injected. When STT is unavailable the app still boots and a plain audio
+    dependencies injected by the caller (tests pass fakes explicitly). If
+    a provider is not injected, the app builds it from environment config;
+    unconfigured stages remain disabled. When STT is unavailable the app
+    still boots and a plain audio
     turn still succeeds with 200 + X-Turn-Id — this milestone's ingest-only
     contract ("backend может ответить простым 200 OK без аудио-тела [без
     STT/Hermes/TTS]") is preserved.
@@ -128,7 +153,7 @@ def create_app(
 
     # All archive access goes through the one ArchiveStore (M2-05): it owns
     # the turn-directory layout (ТЗ §18) and the atomic metadata.json write.
-    store = ArchiveStore(root)
+    store = MetadataArchiveStore(root)
 
     # STT provider: explicit injection wins; otherwise fall back to the
     # env-configured production provider (ТЗ §20). Tests always inject a
@@ -136,13 +161,18 @@ def create_app(
     # singleton at the bottom of this module.
     stt_provider = stt if stt is not None else _default_stt_provider()
 
-    # Hermes stage: the single-call policy (ТЗ §21–24) lives here. The
-    # endpoint wraps the injected client once, per app instance; concurrent
+    # Hermes stage: explicit dependencies win; production uses environment
+    # config. The endpoint wraps the client once, per app instance; concurrent
     # turns share the stage safely because the raw payload travels through
     # a task-local ContextVar, not an instance attribute.
-    hermes_stage = HermesStage(hermes) if hermes is not None else None
+    hermes_client = hermes if hermes is not None else _default_hermes_client()
+    tts_provider = tts if tts is not None else _default_tts_provider()
+    hermes_stage = HermesStage(hermes_client) if hermes_client is not None else None
 
     app = FastAPI(title="Hermes Voice Gateway", version="0.2.0")
+    app.state.stt_provider = stt_provider
+    app.state.hermes_client = hermes_client
+    app.state.tts_provider = tts_provider
 
     @app.get("/health")
     async def health() -> dict:
@@ -292,6 +322,7 @@ def create_app(
         except Exception:
             save_status(ErrorCode.INTERNAL_ERROR.value, "wav finalization failed")
             raise HTTPException(status_code=500, detail=str(ErrorCode.INTERNAL_ERROR))
+        pcm_path.unlink(missing_ok=True)
 
         bytes_per_second = sample_rate * channels * 2
         audio_duration_ms = input_bytes * 1000 // bytes_per_second if bytes_per_second else None
@@ -315,16 +346,28 @@ def create_app(
             return Response(status_code=200, media_type="audio/wav",
                             headers={"X-Turn-Id": turn_id})
 
-        # --- STT (sync contract: call directly, no thread pool) -----------
+        # --- STT: use the concrete async transport in this ASGI event loop;
+        # injected synchronous providers keep their existing contract. ---
         stt_start = time.perf_counter()
         metrics.active_turns.inc()
         try:
-            transcript = stt_provider.transcribe(wav_path)
-        except Exception as exc:  # STTClientError + any unexpected STT break
+            if isinstance(stt_provider, OpenAICompatibleSTT):
+                transcript = await stt_provider.transcribe_async(wav_path)
+            else:
+                transcript = await asyncio.to_thread(stt_provider.transcribe, wav_path)
+        except STTClientError as exc:
             metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
             metrics.active_turns.dec()
             return fail_turn(ErrorCode.STT_FAILED.value, str(exc),
                              input_bytes, audio_duration_ms)
+        except Exception:
+            metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
+            metrics.active_turns.dec()
+            save_status(ErrorCode.INTERNAL_ERROR.value, "stt failed",
+                        input_bytes, audio_duration_ms)
+            return JSONResponse(status_code=500,
+                                content={"error": ErrorCode.INTERNAL_ERROR.value,
+                                         "turn_id": turn_id})
         metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
         metrics.active_turns.dec()
 
@@ -377,13 +420,25 @@ def create_app(
                           {"raw": raw, "reply": response.reply,
                            "note_create": response.note.create})
         atomic_write_bytes(turn_dir / "reply.txt", response.reply.encode("utf-8"))
+        reply_wav_path = turn_dir / "reply.wav"
+        if tts_provider is not None:
+            try:
+                tts_provider.synthesize(response.reply, reply_wav_path)
+                reply_audio = reply_wav_path.read_bytes()
+            except TTSProviderError as exc:
+                return fail_turn(ErrorCode.TTS_FAILED.value, str(exc),
+                                 input_bytes, audio_duration_ms,
+                                 extra={"transcript": transcript.text,
+                                        "reply": response.reply})
+        else:
+            reply_audio = b""
         save_status("success", None, input_bytes, audio_duration_ms,
                     extra={"transcript": transcript.text, "reply": response.reply})
         metrics.turns_total.labels(status="success").inc()
 
         # ТЗ §12: 200 OK + X-Turn-Id. The WAV *body* arrives in Milestone 6;
         # this milestone answers plain 200 with no audio body (task spec).
-        return Response(status_code=200, media_type="audio/wav",
+        return Response(content=reply_audio, status_code=200, media_type="audio/wav",
                         headers={"X-Turn-Id": turn_id})
 
     return app

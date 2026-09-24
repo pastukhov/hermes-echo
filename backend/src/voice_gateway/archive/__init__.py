@@ -19,10 +19,10 @@ talks to the archive through :class:`MetadataArchiveStore` so the
 atomic-write guarantee is applied in exactly one place.
 
 The package also re-exports the :class:`ArchiveStore` ABSTRACTION (ТЗ
-section 16) — the contract a turn's audio archive must satisfy — and its
-supporting types (:class:`AudioFormat`, :class:`ArchiveError`). The
-filesystem implementation of that abstraction arrives with card
-t_eb697c7e in :mod:`voice_gateway.archive.filesystem`.
+section 16) — the contract a turn's audio archive must satisfy — its
+supporting types (:class:`AudioFormat`, :class:`ArchiveError`) and the
+filesystem implementation :class:`FilesystemArchiveStore` (card
+t_eb697c7e) from :mod:`voice_gateway.archive.filesystem`.
 """
 from __future__ import annotations
 
@@ -42,6 +42,10 @@ from backend.src.voice_gateway.archive.base import (
     AudioFormat,
     INPUT_WAV_FILENAME,
     RAW_PCM_FILENAME,
+)
+from backend.src.voice_gateway.archive.filesystem import (
+    DEFAULT_ARCHIVE_ROOT,
+    FilesystemArchiveStore,
 )
 from backend.src.voice_gateway.archive.metadata import TurnMetadata
 
@@ -80,12 +84,14 @@ class MetadataArchiveStore:
 
 
 __all__ = [
+    "DEFAULT_ARCHIVE_ROOT",
     "INPUT_WAV_FILENAME",
     "METADATA_FILENAME",
     "RAW_PCM_FILENAME",
     "ArchiveError",
     "ArchiveStore",
     "AudioFormat",
+    "FilesystemArchiveStore",
     "MetadataArchiveStore",
     "TurnMetadata",
     "atomic_write_bytes",

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from backend.src.voice_gateway.models import Transcript
-from backend.src.voice_gateway.stt import STTProvider, FakeSTT
+from backend.src.voice_gateway.stt import FakeSTT, STTProvider
 
 
 class TestFakeSTT:

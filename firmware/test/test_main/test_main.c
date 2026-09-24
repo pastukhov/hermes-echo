@@ -1,26 +1,27 @@
 /*
  * Host harness for the M1-03/M1-04 audio integration in main.c (built on
- * top of the M1-05 button/LED integration).
+ * top of the M1-05 button integration).
  *
  * Drives app_tick() with scripted button + microphone input through the
- * fake hw seam and asserts the full state machine path, the state->LED
- * mapping required by the spec (red = record, green = play), and that
+ * fake hw seam and asserts the full state machine path and that
  * captured audio actually reaches the speaker via the loopback path
  * (M1 has no backend yet, see main.c's file header).
  */
 #include <stdio.h>
 #include <string.h>
+#include <arpa/inet.h>
 
 #include <unity.h>
 
 #include "button_driver.h"
 #include "hardware.h"
 #include "http_session.h"
-#include "led_config.h"
-#include "led_ui.h"
 #include "state_machine.h"
 #include "playback_occupancy.h"
 #include "voice_transport.h"
+#include "voice_setup_access.h"
+#include "voice_settings.h"
+#include "voice_wifi_setup.h"
 #include "fakes/hw_fakes.h"
 
 /* app API (declared here; test build has no VOICE_WITH_MAIN, so main() is
@@ -53,7 +54,6 @@ static void test_ring_buffer_overflow_recovery(void);
 static void test_max_record_seconds_auto_finish(void);
 static void test_playback_conn_drop_recovery(void);
 static void test_playback_bad_wav_header_recovery(void);
-static void test_led_section9_all_states(void);
 static void test_playback_eof_idle_transition_full_buffer(void);
 static void test_playback_eof_idle_transition_near_empty_buffer(void);
 static void test_playback_eof_idempotent_no_double_cleanup(void);
@@ -61,6 +61,92 @@ static void test_playback_repeated_cycles_no_resource_accumulation(void);
 static void test_playback_occupancy_reaches_zero_after_drain_time(void);
 static void test_playback_occupancy_edge_cases(void);
 static void test_transport_finish_keeps_response_socket(void);
+static void test_setup_access_subnet_filter(void);
+static void test_setup_access_ipv4_mapped_ipv6_filter(void);
+static void tick_to(uint32_t target_ms);
+
+static void test_error_stays_until_fresh_button_tap(void) {
+  hw_fake_reset(&g_hw_fake);
+  app_init();
+  tick_to(60);
+  hw_fake_set_button(&g_hw_fake, true);
+  tick_to(200);
+  TEST_ASSERT_EQUAL(STATE_RECORDING, app_state());
+  app_test_simulate_ring_overflow();
+  app_tick();
+  TEST_ASSERT_EQUAL(STATE_ERROR, app_state());
+
+  tick_to(3000);
+  TEST_ASSERT_EQUAL(STATE_ERROR, app_state());
+  hw_fake_set_button(&g_hw_fake, false);
+  tick_to(3200);
+  TEST_ASSERT_EQUAL(STATE_ERROR, app_state());
+  hw_fake_set_button(&g_hw_fake, true);
+  tick_to(3400);
+  TEST_ASSERT_EQUAL(STATE_ERROR, app_state());
+  hw_fake_set_button(&g_hw_fake, false);
+  tick_to(3600);
+  TEST_ASSERT_EQUAL(STATE_IDLE, app_state());
+  tick_to(3800);
+  TEST_ASSERT_EQUAL(STATE_IDLE, app_state());
+
+  hw_fake_set_button(&g_hw_fake, true);
+  tick_to(4000);
+  TEST_ASSERT_EQUAL(STATE_RECORDING, app_state());
+}
+
+static void test_mac_replaces_saved_device_id(void) {
+  voice_settings_t settings = {0};
+  strcpy(settings.device_id, "old-custom-id");
+  const uint8_t mac[6] = {0x7c, 0xe8, 0xb1, 0xe4, 0xb7, 0x80};
+  voice_settings_set_device_id_from_mac(&settings, mac);
+  TEST_ASSERT_EQUAL_STRING("7ce8b1e4b780", settings.device_id);
+}
+
+static void test_mac_keeps_leading_zeros(void) {
+  voice_settings_t settings = {0};
+  const uint8_t mac[6] = {0x00, 0x01, 0x0a, 0x10, 0x20, 0xff};
+  voice_settings_set_device_id_from_mac(&settings, mac);
+  TEST_ASSERT_EQUAL_STRING("00010a1020ff", settings.device_id);
+}
+
+static void test_setup_ap_waits_a_minute_while_disconnected(void) {
+  voice_wifi_setup_t state;
+  voice_wifi_setup_init(&state, true, 1000);
+  TEST_ASSERT_FALSE(voice_wifi_setup_should_start_ap(&state, 60999));
+  TEST_ASSERT_TRUE(voice_wifi_setup_should_start_ap(&state, 61000));
+}
+
+static void test_setup_ap_is_immediate_without_credentials(void) {
+  voice_wifi_setup_t state;
+  voice_wifi_setup_init(&state, false, 1000);
+  TEST_ASSERT_TRUE(voice_wifi_setup_should_start_ap(&state, 1000));
+}
+
+static void test_setup_ap_closes_on_ip_and_reopens_after_new_outage(void) {
+  voice_wifi_setup_t state;
+  voice_wifi_setup_init(&state, true, 0);
+  voice_wifi_setup_set_ap_active(&state, true);
+  voice_wifi_setup_set_connected(&state, true, 70000);
+  TEST_ASSERT_TRUE(voice_wifi_setup_should_stop_ap(&state));
+  voice_wifi_setup_set_ap_active(&state, false);
+  voice_wifi_setup_set_connected(&state, false, 90000);
+  TEST_ASSERT_FALSE(voice_wifi_setup_should_start_ap(&state, 149999));
+  TEST_ASSERT_TRUE(voice_wifi_setup_should_start_ap(&state, 150000));
+}
+
+static void test_setup_ap_name_uses_last_mac_byte(void) {
+  const uint8_t mac[6] = {0x7c, 0xe8, 0xb1, 0xe4, 0xb7, 0x80};
+  char ssid[33];
+  TEST_ASSERT_TRUE(voice_wifi_setup_ssid(ssid, sizeof(ssid), mac));
+  TEST_ASSERT_EQUAL_STRING("Hermes-StickS3-Setup-80", ssid);
+}
+
+static void test_setup_ap_name_rejects_short_buffer(void) {
+  const uint8_t mac[6] = {0, 0, 0, 0, 0, 0xff};
+  char ssid[8];
+  TEST_ASSERT_FALSE(voice_wifi_setup_ssid(ssid, sizeof(ssid), mac));
+}
 
 static void tick_to(uint32_t target_ms) {
   while (g_hw_fake.clock_ms < target_ms) {
@@ -69,16 +155,21 @@ static void tick_to(uint32_t target_ms) {
   }
 }
 
+static void acknowledge_error(void) {
+  hw_fake_set_button(&g_hw_fake, false);
+  tick_to(g_hw_fake.clock_ms + 100);
+  hw_fake_set_button(&g_hw_fake, true);
+  tick_to(g_hw_fake.clock_ms + 100);
+  hw_fake_set_button(&g_hw_fake, false);
+  tick_to(g_hw_fake.clock_ms + 100);
+}
+
 /* Advance one 10ms tick and return the resulting app state, for tests that
  * need to observe a transient single-tick state (e.g. PROCESSING). */
 static state_t step_tick(void) {
   hw_fake_set_clock(&g_hw_fake, g_hw_fake.clock_ms + 10);
   app_tick();
   return app_state();
-}
-
-static bool led_is(uint16_t expected_rgb565) {
-  return g_hw_fake.led_rgb565 == expected_rgb565;
 }
 
 /*
@@ -97,10 +188,7 @@ static void test_full_state_machine_scenario(void) {
   /* Drive BOOT -> IDLE. */
   tick_to(60);
 
-  /* After boot the LED state must be IDLE (dim blue, steady — spec
-   * section 9 "слабый синий"). */
-  CHECK(led_get_state() == LED_STATE_IDLE, "LED state IDLE after boot");
-  CHECK(g_hw_fake.led_rgb565 == LED_RGB_BLUE_DIM, "IDLE LED is dim blue");
+  CHECK(app_state() == STATE_IDLE, "IDLE after boot");
 
   /* Script the microphone to have one short phrase ready (M1-03): the
    * loopback buffer should end up with exactly this many bytes. */
@@ -110,22 +198,17 @@ static void test_full_state_machine_scenario(void) {
    * PLAYING is observable for more than a single tick (see below). */
   hw_fake_set_playback_drained(&g_hw_fake, false);
 
-  /* IDLE -> press button: expect RECORDING with red LED and the
+  /* IDLE -> press button: expect RECORDING and the
    * microphone (M1-03) actually started. */
   hw_fake_set_button(&g_hw_fake, true);
   tick_to(200);
   CHECK(app_state() == STATE_RECORDING, "RECORDING after press");
-  CHECK(led_get_state() == LED_STATE_RECORDING, "LED state RECORDING after press");
   CHECK(g_hw_fake.capture_start_calls == 1, "microphone started once on press");
-  /* Spec section 9: RECORDING is steady red ("красный", no blink) for the
-   * whole window. */
-  uint32_t red_seen = 0, green_seen = 0;
+  /* Hold RECORDING long enough to capture the scripted phrase. */
   for (uint32_t t = 200; t < 750; t += 10) {
     hw_fake_set_clock(&g_hw_fake, t);
     app_tick();
-    if (g_hw_fake.led_rgb565 == LED_RGB_RED) red_seen++;
   }
-  CHECK(red_seen == 55, "LED steady red for the entire RECORDING window");
   CHECK(g_hw_fake.capture_bytes_read_total == phrase_bytes,
         "all scripted mic audio was captured (M1-03) while RECORDING");
 
@@ -146,16 +229,13 @@ static void test_full_state_machine_scenario(void) {
   CHECK(g_hw_fake.capture_stop_calls == 1, "microphone stopped once on release");
   CHECK(saw_processing, "state machine passed through PROCESSING");
   CHECK(saw_playing, "state machine reached PLAYING");
-  CHECK(led_get_state() == LED_STATE_PLAYBACK, "LED state PLAYBACK");
   CHECK(g_hw_fake.playback_start_calls == 1, "speaker started once entering PLAYING");
 
-  /* Spec section 9: PLAYBACK is steady green ("зелёный", no blink). */
+  /* Keep playback open while the speaker has not drained. */
   for (uint32_t i = 0; i < 50; i++) {
     hw_fake_set_clock(&g_hw_fake, g_hw_fake.clock_ms + 10);
     app_tick();
-    if (g_hw_fake.led_rgb565 == LED_RGB_GREEN) green_seen++;
   }
-  CHECK(green_seen == 50, "LED steady green for the entire PLAYING window");
   CHECK(app_state() == STATE_PLAYING, "still PLAYING while hardware has not drained");
   CHECK(g_hw_fake.playback_bytes_written_total == phrase_bytes,
         "every captured byte was handed to the speaker (M1-04 loopback)");
@@ -164,16 +244,12 @@ static void test_full_state_machine_scenario(void) {
   hw_fake_set_playback_drained(&g_hw_fake, true);
   tick_to(g_hw_fake.clock_ms + 100);
   CHECK(app_state() == STATE_IDLE, "IDLE after playback drains");
-  CHECK(led_get_state() == LED_STATE_IDLE, "LED state IDLE after playback");
-  CHECK(g_hw_fake.led_rgb565 == LED_RGB_BLUE_DIM,
-        "IDLE LED back to steady dim blue after playback");
   CHECK(g_hw_fake.playback_stop_calls == 1, "speaker stopped once after draining");
-  CHECK(g_hw_fake.led_writes > 0, "LED writes happened");
   CHECK(g_hw_fake.button_reads > 0, "button was polled");
 
   printf(failures == 0
              ? "OK: BOOT->IDLE->RECORDING->PROCESSING->PLAYING->IDLE + "
-               "button/LED (red=record, green=play) + M1-03/M1-04 audio "
+               "button + M1-03/M1-04 audio "
                "loopback verified\n"
              : "TEST FAILURES: %d\n",
          failures);
@@ -193,8 +269,17 @@ int main(void) {
   RUN_TEST(test_playback_repeated_cycles_no_resource_accumulation);
   RUN_TEST(test_playback_occupancy_reaches_zero_after_drain_time);
   RUN_TEST(test_playback_occupancy_edge_cases);
-  RUN_TEST(test_led_section9_all_states);
   RUN_TEST(test_transport_finish_keeps_response_socket);
+  RUN_TEST(test_setup_access_subnet_filter);
+  RUN_TEST(test_setup_access_ipv4_mapped_ipv6_filter);
+  RUN_TEST(test_error_stays_until_fresh_button_tap);
+  RUN_TEST(test_mac_replaces_saved_device_id);
+  RUN_TEST(test_mac_keeps_leading_zeros);
+  RUN_TEST(test_setup_ap_waits_a_minute_while_disconnected);
+  RUN_TEST(test_setup_ap_is_immediate_without_credentials);
+  RUN_TEST(test_setup_ap_closes_on_ip_and_reopens_after_new_outage);
+  RUN_TEST(test_setup_ap_name_uses_last_mac_byte);
+  RUN_TEST(test_setup_ap_name_rejects_short_buffer);
   return UNITY_END();
 }
 
@@ -202,7 +287,7 @@ int main(void) {
  * Spec section 10: simulate the I2S capture task filling the ring buffer
  * past capacity while recording. The app must stop recording immediately
  * (not keep silently dropping data), stop the microphone (M1-03), close
- * the HTTP session gracefully, show ERROR (blinking red), then recover to
+ * the HTTP session gracefully, show ERROR, then recover to
  * IDLE without a reboot.
  */
 static int overflow_failures = 0;
@@ -238,43 +323,29 @@ static void test_ring_buffer_overflow_recovery(void) {
   /* One tick later: recording must have STOPPED — ERROR, not RECORDING. */
   app_tick();
   OCHECK(app_state() == STATE_ERROR, "ERROR immediately after overflow");
-  OCHECK(led_get_state() == LED_STATE_ERROR, "LED in ERROR state");
   OCHECK(g_hw_fake.capture_stop_calls == 1, "microphone stopped on overflow");
   /* Graceful close: CLOSED and NOT aborted. */
   OCHECK(app_session_state() == HTTP_SESSION_CLOSED, "session CLOSED after overflow");
   OCHECK(!app_session_aborted(), "session closed gracefully, not aborted");
-  /*
-   * Spec section 9: ERROR is blinking red (мигающий красный). Stay well
-   * inside the APP_ERROR_RECOVER_TICKS budget (10 ticks) while sampling —
-   * the ERROR blink period/duty (250 ms / 125 ms, see led_config.h) needs
-   * only a handful of ticks to show both phases, and running the loop past
-   * the recovery budget would trigger the ERROR->IDLE transition mid-loop
-   * and corrupt the "still ERROR" assertion below.
-   */
-  int red_on = 0, red_off = 0;
+  /* Error must remain active before the user acknowledges it. */
   for (uint32_t t = 210; t < 290; t += 10) {
     hw_fake_set_clock(&g_hw_fake, t);
     app_tick();
-    if (g_hw_fake.led_rgb565 == LED_RGB_RED) red_on++;
-    if (g_hw_fake.led_rgb565 == LED_RGB_OFF) red_off++;
   }
-  OCHECK(red_on > 0 && red_off > 0, "ERROR LED blinks red (on + off phases)");
   OCHECK(app_state() == STATE_ERROR, "still ERROR during recovery window");
 
   /*
    * The user releases the button once the overflow/ERROR indication shows
    * (recording already stopped when the overflow fired). Without this, the
-   * button would still read "pressed" when ERROR recovers to IDLE and
-   * button_reset() re-arms it, causing an immediate spurious PRESSED event
-   * that reopens RECORDING before this test can observe the IDLE state —
-   * a separate, deliberate re-press is exercised further down instead.
+   * release only arms acknowledgement; it must not itself dismiss ERROR.
    */
   hw_fake_set_button(&g_hw_fake, false);
 
-  /* Recovery: ERROR -> IDLE after APP_ERROR_RECOVER_TICKS, no reboot. */
+  /* Error remains visible until a separate button tap. */
   tick_to(2000);
+  OCHECK(app_state() == STATE_ERROR, "ERROR waits for acknowledgement");
+  acknowledge_error();
   OCHECK(app_state() == STATE_IDLE, "IDLE after recovery");
-  OCHECK(led_get_state() == LED_STATE_IDLE, "LED back to IDLE after recovery");
   OCHECK(!app_session_aborted(), "no abort ever happened");
 
   /* A new recording works after recovery (flag was cleared on start), and
@@ -352,7 +423,6 @@ static void test_max_record_seconds_auto_finish(void) {
     step_tick();
   }
   MCHECK(app_state() == STATE_IDLE, "IDLE after auto-finished turn");
-  MCHECK(led_get_state() == LED_STATE_IDLE, "LED IDLE after auto-finished turn");
 
   TEST_ASSERT_EQUAL_INT_MESSAGE(
       0, maxrec_failures,
@@ -362,11 +432,11 @@ static void test_max_record_seconds_auto_finish(void) {
 /*
  * Spec sections 8/13/38: a backend connection drop mid-stream during
  * PLAYING must drive the device PLAYING -> ERROR -> (after
- * APP_ERROR_RECOVER_TICKS) IDLE automatically, without reboot, and without
+ * a separate button tap) IDLE, without reboot, and without
  * hanging. Structured as a close mirror of
  * test_ring_buffer_overflow_recovery() (the analogous RECORDING-side
- * failure), since both go through the same ERROR/recovery/LED machinery in
- * main.c's enter_state()/APP_ERROR_RECOVER_TICKS.
+ * failure), since both go through the same ERROR/recovery machinery in
+ * main.c's enter_state()/acknowledgement path.
  */
 static int conn_drop_failures = 0;
 
@@ -404,14 +474,6 @@ static void test_playback_conn_drop_recovery(void) {
   CDCHECK(saw_playing, "state machine reached PLAYING");
   CDCHECK(g_hw_fake.playback_start_calls == 1, "speaker started once entering PLAYING");
 
-  /* Snap the clock forward (monotonically) to a phase matching the known
-   * blink boundary used by test_ring_buffer_overflow_recovery (entry ends
-   * in "...200" mod the 250ms ERROR blink period): the LED sampling window
-   * below then straddles the on/off boundary the same deterministic way,
-   * regardless of how many ticks it took to reach PLAYING above. */
-  uint32_t entry_clock = (g_hw_fake.clock_ms / 250 + 1) * 250 + 200;
-  hw_fake_set_clock(&g_hw_fake, entry_clock);
-
   /* Backend connection drops mid-stream while the reply is being played
    * (the scenario this task's acceptance criteria calls out by name:
    * "обрыв соединения во время стрима ответа"). This must not hang the
@@ -419,27 +481,13 @@ static void test_playback_conn_drop_recovery(void) {
   app_test_simulate_playback_conn_drop();
   app_tick();
   CDCHECK(app_state() == STATE_ERROR, "ERROR immediately after connection drop");
-  CDCHECK(led_get_state() == LED_STATE_ERROR, "LED in ERROR state");
   CDCHECK(g_hw_fake.playback_stop_calls == 1, "speaker stopped on connection drop");
 
-  /* Stay inside the APP_ERROR_RECOVER_TICKS budget while sampling the LED
-   * (same rationale as test_ring_buffer_overflow_recovery: running past the
-   * recovery budget would fire ERROR->IDLE mid-loop and corrupt the "still
-   * ERROR" assertion below). */
-  int red_on = 0, red_off = 0;
-  for (uint32_t t = entry_clock + 10; t < entry_clock + 90; t += 10) {
-    hw_fake_set_clock(&g_hw_fake, t);
-    app_tick();
-    if (g_hw_fake.led_rgb565 == LED_RGB_RED) red_on++;
-    if (g_hw_fake.led_rgb565 == LED_RGB_OFF) red_off++;
-  }
-  CDCHECK(red_on > 0 && red_off > 0, "ERROR LED blinks red (on + off phases, spec section 9)");
-  CDCHECK(app_state() == STATE_ERROR, "still ERROR during recovery window");
-
-  /* Recovery: ERROR -> IDLE after APP_ERROR_RECOVER_TICKS, no reboot. */
+  /* Recovery: ERROR -> IDLE only after a separate button tap. */
   tick_to(g_hw_fake.clock_ms + 2000);
+  CDCHECK(app_state() == STATE_ERROR, "ERROR waits for acknowledgement");
+  acknowledge_error();
   CDCHECK(app_state() == STATE_IDLE, "IDLE after recovery, no reboot required");
-  CDCHECK(led_get_state() == LED_STATE_IDLE, "LED back to IDLE after recovery");
 
   /* A new turn works after recovery (flags were cleared on the next
    * playback_start()), proving the device is not wedged. */
@@ -462,7 +510,7 @@ static void test_playback_conn_drop_recovery(void) {
 
 /*
  * Spec sections 8/13/38: a malformed/incorrect WAV header on the reply must
- * also drive PLAYING -> ERROR -> IDLE automatically, without reboot. Same
+ * also drive PLAYING -> ERROR, then IDLE on acknowledgement. Same
  * shape as test_playback_conn_drop_recovery() above, just the other
  * sticky flag.
  */
@@ -499,138 +547,16 @@ static void test_playback_bad_wav_header_recovery(void) {
   app_test_simulate_playback_bad_wav_header();
   app_tick();
   WVCHECK(app_state() == STATE_ERROR, "ERROR immediately after bad WAV header");
-  WVCHECK(led_get_state() == LED_STATE_ERROR, "LED in ERROR state");
   WVCHECK(g_hw_fake.playback_stop_calls == 1, "speaker stopped on bad WAV header");
 
   tick_to(g_hw_fake.clock_ms + 2000);
+  WVCHECK(app_state() == STATE_ERROR, "ERROR waits for acknowledgement");
+  acknowledge_error();
   WVCHECK(app_state() == STATE_IDLE, "IDLE after recovery, no reboot required");
-  WVCHECK(led_get_state() == LED_STATE_IDLE, "LED back to IDLE after recovery");
 
   TEST_ASSERT_EQUAL_INT_MESSAGE(
       0, bad_wav_failures,
       "playback bad-WAV-header scenario had CHECK() failures, see stdout above");
-}
-
-/*
- * Spec section 9 acceptance (this task's direct criterion): every state in
- * the section-9 LED table must show exactly its specified color/pattern,
- * across every transition path the state machine can take -- IDLE (dim
- * blue, steady), RECORDING (steady red), PROCESSING (steady yellow),
- * PLAYBACK (steady green) and ERROR (blinking red) -- and the LED must
- * follow the state through a full turn plus an error and recovery back to
- * IDLE. The other tests sample colors incidentally along their own
- * scenarios; this one pins the section-9 table state-by-state, including
- * the single-tick PROCESSING state no other test observes.
- */
-static int led9_failures = 0;
-
-#define L9CHECK(cond, msg)                                             \
-  do {                                                                 \
-    if (!(cond)) {                                                     \
-      printf("FAIL: %s (line %d)\n", msg, __LINE__);                   \
-      led9_failures++;                                                 \
-    }                                                                  \
-  } while (0)
-
-static void test_led_section9_all_states(void) {
-  hw_fake_reset(&g_hw_fake);
-  app_init();
-
-  /* BOOT -> IDLE: section 9 "слабый синий", steady. */
-  tick_to(60);
-  L9CHECK(app_state() == STATE_IDLE, "IDLE after boot");
-  L9CHECK(led_get_state() == LED_STATE_IDLE, "LED state IDLE");
-  L9CHECK(g_hw_fake.led_rgb565 == LED_RGB_BLUE_DIM, "IDLE shows dim blue");
-
-  /* Full turn with a short phrase: RECORDING -> PROCESSING -> PLAYING. */
-  const size_t phrase_bytes = 96;
-  hw_fake_set_capture_available(&g_hw_fake, phrase_bytes);
-  hw_fake_set_playback_drained(&g_hw_fake, false);
-  hw_fake_set_button(&g_hw_fake, true);
-  tick_to(200);
-  L9CHECK(app_state() == STATE_RECORDING, "RECORDING after press");
-  L9CHECK(led_get_state() == LED_STATE_RECORDING, "LED state RECORDING");
-  /* Steady red for the entire recording window: every single tick of it
-   * shows red, none of them off or any other color. */
-  int red_ticks = 0;
-  for (int i = 0; i < 10; i++) {
-    step_tick();
-    if (g_hw_fake.led_rgb565 == LED_RGB_RED) red_ticks++;
-  }
-  L9CHECK(red_ticks == 10, "RECORDING shows steady red every tick");
-
-  hw_fake_set_button(&g_hw_fake, false);
-  int saw_processing = 0, saw_playback = 0;
-  for (int i = 0; i < 40 && !saw_playback; i++) {
-    state_t s = step_tick();
-    if (s == STATE_PROCESSING) saw_processing = 1;
-    if (s == STATE_PLAYING) saw_playback = 1;
-  }
-  L9CHECK(saw_processing, "passed through PROCESSING");
-  L9CHECK(saw_playback, "reached PLAYING");
-
-  /* PLAYBACK: section 9 "зелёный", steady, for every tick the state lasts
-   * (held open with playback_drained = false). */
-  int green_ticks = 0;
-  for (int i = 0; i < 20; i++) {
-    step_tick();
-    if (g_hw_fake.led_rgb565 == LED_RGB_GREEN) green_ticks++;
-  }
-  L9CHECK(green_ticks == 20, "PLAYBACK shows steady green every tick");
-  L9CHECK(led_get_state() == LED_STATE_PLAYBACK, "LED state PLAYBACK");
-
-  /* EOF -> IDLE: dim blue again, steady. */
-  hw_fake_set_playback_drained(&g_hw_fake, true);
-  step_tick();
-  L9CHECK(app_state() == STATE_IDLE, "IDLE after playback drains");
-  L9CHECK(led_get_state() == LED_STATE_IDLE, "LED state IDLE after playback");
-  /* led_update() runs at the top of app_tick(), so the pixel that shows
-   * the NEW state is written on the tick AFTER the transition; sample one
-   * tick later. */
-  step_tick();
-  L9CHECK(g_hw_fake.led_rgb565 == LED_RGB_BLUE_DIM, "IDLE back to dim blue");
-
-  /* Error path (section 9: "мигающий красный"): drive RECORDING -> ERROR
-   * with the ring-overflow hook (the overflow flag is only checked in the
-   * RECORDING tick, so the app must actually be recording when it fires).
-   * The ERROR blink is ON for the first 125 ms of each 250 ms cycle
-   * (led_config.h), and led_update() runs at the top of app_tick(), so
-   * the first ERROR pixel is drawn on the tick that detects the
-   * overflow. We hold the button and advance in RECORDING until that
-   * detection tick's clock phase is exactly 100 ms, so the following
-   * 9-tick sampling window covers phases 100..180 -- ON through 120,
-   * OFF from 130 -- observing both blink phases while still inside the
-   * 10-tick APP_ERROR_RECOVER_TICKS budget (the state cannot leave
-   * ERROR mid-sampling). */
-  hw_fake_set_button(&g_hw_fake, true);
-  tick_to(g_hw_fake.clock_ms + 100);
-  L9CHECK(app_state() == STATE_RECORDING, "RECORDING for error-path setup");
-  while ((g_hw_fake.clock_ms + 10) % 250 != 100) {
-    step_tick(); /* stay in RECORDING, aligning the blink phase */
-  }
-  app_test_simulate_ring_overflow();
-  step_tick();
-  L9CHECK(app_state() == STATE_ERROR, "ERROR after overflow");
-  L9CHECK(led_get_state() == LED_STATE_ERROR, "LED state ERROR");
-  hw_fake_set_button(&g_hw_fake, false); /* release before recovery */
-  int red_on = 0, red_off = 0;
-  for (int i = 0; i < 9; i++) {
-    step_tick();
-    if (g_hw_fake.led_rgb565 == LED_RGB_RED) red_on++;
-    if (g_hw_fake.led_rgb565 == LED_RGB_OFF) red_off++;
-  }
-  L9CHECK(red_on > 0 && red_off > 0, "ERROR blinks red (on + off phases)");
-  L9CHECK(app_state() == STATE_ERROR, "still ERROR inside recovery budget");
-
-  /* Recovery: ERROR -> IDLE, and the LED returns to steady dim blue. */
-  tick_to(g_hw_fake.clock_ms + 2000);
-  L9CHECK(app_state() == STATE_IDLE, "IDLE after ERROR recovery");
-  L9CHECK(led_get_state() == LED_STATE_IDLE, "LED state IDLE after recovery");
-  L9CHECK(g_hw_fake.led_rgb565 == LED_RGB_BLUE_DIM, "dim blue after recovery");
-
-  TEST_ASSERT_EQUAL_INT_MESSAGE(
-      0, led9_failures,
-      "section-9 LED mapping scenario had CHECK() failures, see stdout above");
 }
 
 /*
@@ -708,7 +634,6 @@ static void test_playback_eof_idle_transition_full_buffer(void) {
   hw_fake_set_playback_drained(&g_hw_fake, true);
   app_tick();
   EOFFCHECK(app_state() == STATE_IDLE, "IDLE within one tick of confirmed EOF");
-  EOFFCHECK(led_get_state() == LED_STATE_IDLE, "LED IDLE after EOF transition");
 
   /* Resource cleanup on IDLE entry (spec section 8): ring buffer freed,
    * pending chunk cleared, position counter cleared, DMA/I2S stopped. */
@@ -1024,4 +949,28 @@ static void test_transport_finish_keeps_response_socket(void) {
   TEST_ASSERT_EQUAL_INT(1, probe.finishes);
   TEST_ASSERT_EQUAL_INT(1, probe.polls);
   TEST_ASSERT_EQUAL_INT(0, probe.aborted);
+}
+
+static uint32_t test_ipv4(const char *text) {
+  struct in_addr address;
+  TEST_ASSERT_EQUAL_INT(1, inet_pton(AF_INET, text, &address));
+  return ntohl(address.s_addr);
+}
+
+static void test_setup_access_subnet_filter(void) {
+  const uint8_t client[] = {192, 168, 4, 23};
+  TEST_ASSERT_TRUE(voice_setup_ipv4_allowed(AF_INET, client, test_ipv4("192.168.4.1"),
+                                            test_ipv4("255.255.255.0")));
+  TEST_ASSERT_FALSE(voice_setup_ipv4_allowed(AF_INET, (const uint8_t[]){192, 168, 5, 23},
+                                             test_ipv4("192.168.4.1"),
+                                             test_ipv4("255.255.255.0")));
+}
+
+static void test_setup_access_ipv4_mapped_ipv6_filter(void) {
+  const uint8_t client[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 4, 23};
+  TEST_ASSERT_TRUE(voice_setup_ipv4_allowed(AF_INET6, client, test_ipv4("192.168.4.1"),
+                                            test_ipv4("255.255.255.0")));
+  TEST_ASSERT_FALSE(voice_setup_ipv4_allowed(AF_INET6, (const uint8_t[16]){0},
+                                              test_ipv4("192.168.4.1"),
+                                              test_ipv4("255.255.255.0")));
 }

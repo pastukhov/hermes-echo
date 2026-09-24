@@ -24,16 +24,7 @@
  *                     before returning to IDLE.
  *
  *   Button read   : button_driver (include/button_driver.h), unchanged.
- *   LED control   : led_ui (include/led_ui.h) + led_config.h, unchanged.
- *
- *   Spec mapping (spec section 9, ТЗ "LED UI"):
- *     IDLE        -> dim blue, steady  (слабый синий)
- *     RECORDING   -> red, steady       (красный)
- *     PROCESSING  -> yellow, steady    (жёлтый)
- *     PLAYING     -> green, steady     (Playback = зелёный)
- *     ERROR       -> red, blinking     (мигающий красный)
- * The concrete RGB values and blink timings live in led_config.h, driven
- * through led_ui.c (M1-05).
+ *   State display : board_sticks3_display_update() renders the LCD.
  *
  * Loopback (Milestone 1 hardware smoke test): there is no backend turn to
  * fetch a reply from yet (networking is Milestone 2, out of scope here),
@@ -50,7 +41,7 @@
  * on one or both buffers exactly like the M2 upload path already handles.
  *
  * Non-goals in this revision: networking (Milestone 2, http_session stays
- * a pure state-tracking seam with no real transport), GPIO/LED module
+ * a pure state-tracking seam with no real transport), GPIO module
  * changes, and any refactor of the existing modules — this task only
  * wires main.c to the audio hw seam that board_atom_echo.c already backs
  * with the real M1-03/M1-04 modules.
@@ -62,8 +53,8 @@
  *     loopback buffer M1-04 plays back once the turn finishes.
  *   - Sticky overflow flag (on app.rb) => stop recording immediately, stop
  *     the capture hardware, close the HTTP session gracefully when
- *     possible (abort fallback), show ERROR (red fast blink), recover to
- *     IDLE after APP_ERROR_RECOVER_TICKS — no reboot.
+ *     possible (abort fallback), show ERROR on the LCD, recover to
+ *     IDLE only after a fresh button tap — no reboot.
  *   - MAX_RECORD_SECONDS (configurable, spec section 7): button_driver fires
  *     MAX_RECORD_TIMEOUT at the limit, which the RECORDING tick treats like a
  *     release, so the recording auto-finishes and the session closes.
@@ -74,6 +65,7 @@
 #include <stdint.h>
 
 #ifdef ESP_PLATFORM
+#include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #endif
@@ -96,18 +88,12 @@
 #ifndef VOICE_GATEWAY_URL
 #define VOICE_GATEWAY_URL "http://192.168.1.10:8000/api/v1/voice/turn"
 #endif
-#ifndef VOICE_DEVICE_ID
-#define VOICE_DEVICE_ID "sticks3-01"
-#endif
 #ifndef VOICE_DEVICE_TOKEN
 #define VOICE_DEVICE_TOKEN NULL
 #endif
-#include "led_ui.h"
 #include "ring_buffer.h"
 #include "state_machine.h"
 
-/* Ticks the app runs in ERROR before recovering to IDLE. */
-#define APP_ERROR_RECOVER_TICKS 10u
 /* Ticks the app waits in BOOT before entering IDLE. */
 #define APP_BOOT_TICKS 5u
 
@@ -115,7 +101,8 @@ typedef struct {
   state_machine_t sm;
   button_driver_t btn;
   uint32_t boot_ticks;
-  uint32_t error_ticks;
+  bool error_ack_ready;
+  bool error_ack_pressed;
   /* Recording path (spec section 10): network-drain buffer (M2 upload). */
   uint8_t rb_storage[RING_BUFFER_CAPACITY_DEFAULT];
   ring_buffer_t rb;
@@ -163,32 +150,13 @@ static size_t response_pcm_sink(void *ctx, const uint8_t *data, size_t len) {
   return ring_buffer_push(&a->playback_rb, data, len);
 }
 
-/* Map app state -> LED device state. */
-static led_state_t led_state_for(state_t s) {
-  switch (s) {
-    case STATE_IDLE:
-      return LED_STATE_IDLE;
-    case STATE_RECORDING:
-      return LED_STATE_RECORDING;
-    case STATE_PROCESSING:
-      return LED_STATE_PROCESSING;
-    case STATE_PLAYING:
-      return LED_STATE_PLAYBACK;
-    case STATE_ERROR:
-      return LED_STATE_ERROR;
-    case STATE_BOOT:
-    default:
-      return LED_STATE_IDLE;
-  }
-}
-
 static void enter_state(state_t next, const char* error_what) {
-  state_t prev = state_machine_get_state(&app.sm);
   if (!state_machine_step(&app.sm, next)) {
     return; /* illegal transition: leave state, report if we can */
   }
   if (next == STATE_ERROR) {
-    app.error_ticks = 0;
+    app.error_ack_ready = false;
+    app.error_ack_pressed = false;
     if (error_what) {
       hw_report_error(error_what);
     }
@@ -196,8 +164,6 @@ static void enter_state(state_t next, const char* error_what) {
   if (next == STATE_IDLE) {
     button_reset(&app.btn); /* don't let a stale hold re-trigger */
   }
-  led_set_state(led_state_for(next));
-  (void)prev;
 }
 
 /*
@@ -388,9 +354,9 @@ void app_init(void) {
    * button_driver auto-fires MAX_RECORD_TIMEOUT, which the RECORDING tick
    * treats like a release, so a held button never records past the limit. */
   button_init(&app.btn, BUTTON_DEBOUNCE_MS_DEFAULT, MAX_RECORD_SECONDS_DEFAULT);
-  led_init();
   app.boot_ticks = 0;
-  app.error_ticks = 0;
+  app.error_ack_ready = false;
+  app.error_ack_pressed = false;
   ring_buffer_init(&app.rb, app.rb_storage, RING_BUFFER_CAPACITY_DEFAULT);
   ring_buffer_init(&app.playback_rb, app.playback_storage,
                     RING_BUFFER_CAPACITY_DEFAULT);
@@ -403,13 +369,17 @@ void app_init(void) {
   http_session_init(&app.session);
 #ifdef ESP_PLATFORM
   (void)voice_settings_load(&voice_settings);
+  uint8_t sta_mac[6];
+  ESP_ERROR_CHECK(esp_read_mac(sta_mac, ESP_MAC_WIFI_STA));
+  voice_settings_set_device_id_from_mac(&voice_settings, sta_mac);
+  board_sticks3_display_set_device_id(voice_settings.device_id);
   if (voice_settings.wifi_ssid[0]) {
     if (!board_sticks3_wifi_start(voice_settings.wifi_ssid,
                                   voice_settings.wifi_password)) {
-      (void)board_sticks3_wifi_start_ap("Hermes-StickS3-Setup");
+      (void)board_sticks3_wifi_start_ap();
     }
   } else {
-    (void)board_sticks3_wifi_start_ap("Hermes-StickS3-Setup");
+    (void)board_sticks3_wifi_start_ap();
   }
   voice_config_httpd_start(&voice_settings);
   const http_voice_config_t cfg = {
@@ -469,7 +439,7 @@ void app_test_simulate_ring_overflow(void) {
  * Test hook: simulate the backend connection dropping mid-stream while a
  * reply is being downloaded/played (spec sections 8/13/38). Sets the sticky
  * flag the STATE_PLAYING tick checks; the next tick drives PLAYING -> ERROR
- * -> (after APP_ERROR_RECOVER_TICKS) IDLE, mirroring
+ * -> (after acknowledgement) IDLE, mirroring
  * app_test_simulate_ring_overflow() on the RECORDING side.
  */
 void app_test_simulate_playback_conn_drop(void) {
@@ -491,9 +461,6 @@ void app_test_simulate_playback_bad_wav_header(void) {
  */
 void app_tick(void) {
   uint32_t now = hw_clock_ms();
-
-  /* LED blink phase advances in every state. */
-  led_update(now);
 
   state_t s = state_machine_get_state(&app.sm);
 
@@ -640,11 +607,19 @@ void app_tick(void) {
       }
       break;
 
-    case STATE_ERROR:
-      if (++app.error_ticks >= APP_ERROR_RECOVER_TICKS) {
+    case STATE_ERROR: {
+      bool raw_pressed = hw_button_raw();
+      button_event_t ev = button_poll(&app.btn, raw_pressed, now);
+      if (!app.error_ack_ready) {
+        if (!raw_pressed && !button_is_pressed(&app.btn))
+          app.error_ack_ready = true;
+      } else if (ev == BUTTON_EVENT_PRESSED) {
+        app.error_ack_pressed = true;
+      } else if (ev == BUTTON_EVENT_RELEASED && app.error_ack_pressed) {
         enter_state(STATE_IDLE, NULL);
       }
       break;
+    }
 
     default:
       break;

@@ -44,6 +44,13 @@ services:
       # does nothing and every turn's archive would vanish on container
       # restart instead of landing in the mounted volume. ---
       ARCHIVE_ROOT: /data/archive
+      VOICE_JOB_DATABASE: /data/archive/voice-jobs.sqlite
+      VOICE_AGENT_PROVIDER: ${VOICE_AGENT_PROVIDER:-hermes}
+      # The host-side Codex adapter is loopback-bound; host networking lets
+      # this existing gateway reach it without exposing Codex credentials.
+      CODEX_AGENT_URL: ${CODEX_AGENT_URL:-http://127.0.0.1:8765}
+      CODEX_AGENT_TOKEN: ${CODEX_AGENT_TOKEN:-}
+      VOICE_DEVICE_TOKENS: ${VOICE_DEVICE_TOKENS:-}
       # --- STT (ТЗ §20) ---
       STT_BASE_URL: ${STT_BASE_URL:-https://api.openai.com/v1}
       STT_API_KEY: ${STT_API_KEY:-${VOICE_TOOLS_OPENAI_KEY:-}}

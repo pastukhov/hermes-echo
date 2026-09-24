@@ -42,6 +42,7 @@ static esp_netif_t *s_wifi_ap_netif;
 static uint16_t *s_screen;
 static state_t s_screen_state = (state_t)-1;
 static int s_screen_phase = -1;
+static screen_processing_phase_t s_screen_processing_phase = SCREEN_PROCESSING_THINKING;
 static bool s_screen_wifi;
 static bool s_screen_timing_reported;
 static char s_screen_device_id[16];
@@ -354,14 +355,17 @@ void board_sticks3_display_set_device_id(const char *device_id) {
   s_screen_state = (state_t)-1;
 }
 
-void board_sticks3_display_update(state_t state, uint32_t now_ms) {
+void board_sticks3_display_update(state_t state, uint32_t now_ms,
+                                 screen_processing_phase_t processing_phase) {
   int phase = (int)(now_ms / 180U);
-  if (state == s_screen_state && phase == s_screen_phase && s_wifi_connected == s_screen_wifi) return;
+  if (state == s_screen_state && phase == s_screen_phase &&
+      processing_phase == s_screen_processing_phase &&
+      s_wifi_connected == s_screen_wifi) return;
   if (!s_screen) s_screen = heap_caps_malloc(SCREEN_W * SCREEN_H * sizeof(*s_screen), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!s_screen) s_screen = heap_caps_malloc(SCREEN_W * SCREEN_H * sizeof(*s_screen), MALLOC_CAP_8BIT);
   if (!s_screen) return;
   lcd_init();
-  screen_ui_view_t view = screen_ui_view(state);
+  screen_ui_view_t view = screen_ui_view_with_phase(state, processing_phase);
   for (int i = 0; i < SCREEN_W * SCREEN_H; ++i) s_screen[i] = C_BG;
   screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 42, 13,
                             SCREEN_FONT_SMALL, "ГЕРМЕС", C_WHITE);
@@ -384,6 +388,7 @@ void board_sticks3_display_update(state_t state, uint32_t now_ms) {
   }
   s_screen_state = state;
   s_screen_phase = phase;
+  s_screen_processing_phase = processing_phase;
   s_screen_wifi = s_wifi_connected;
 }
 

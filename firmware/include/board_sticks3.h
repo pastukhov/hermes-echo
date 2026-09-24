@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "state_machine.h"
+#include "screen_ui.h"
 
 /* Pin mapping M5StackStickS3 (ESP32-S3-PICO-1-N8R8)
  Based on:
@@ -47,6 +48,7 @@ bool board_sticks3_wifi_start(const char *ssid, const char *password);
 bool board_sticks3_wifi_start_ap(void);
 void board_sticks3_log_memory(void);
 void board_sticks3_display_set_device_id(const char *device_id);
-void board_sticks3_display_update(state_t state, uint32_t now_ms);
+void board_sticks3_display_update(state_t state, uint32_t now_ms,
+                                 screen_processing_phase_t phase);
 
 #endif

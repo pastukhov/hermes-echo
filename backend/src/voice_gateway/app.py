@@ -16,6 +16,7 @@ already gone.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import struct
 import time
@@ -29,6 +30,12 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import generate_latest
 
 from backend.common.error_codes import ErrorCode
+from backend.src.voice_gateway.agents.base import AgentClient, AgentClientError, AgentRequest
+from backend.src.voice_gateway.agents.codex_client import CodexAgentClient
+from backend.src.voice_gateway.jobs.api import install_voice_job_routes
+from backend.src.voice_gateway.jobs.auth import parse_device_tokens
+from backend.src.voice_gateway.jobs.store import VoiceJobStore
+from backend.src.voice_gateway.jobs.worker import VoiceJobWorker
 from backend.src.voice_gateway.health import check_live, check_ready
 from backend.src.voice_gateway.archive import (
     MetadataArchiveStore,
@@ -36,6 +43,8 @@ from backend.src.voice_gateway.archive import (
     atomic_write_json,
 )
 from backend.src.voice_gateway.config import (
+    AgentConfig,
+    AgentConfigError,
     HermesConfig,
     HermesConfigError,
     STTConfig,
@@ -50,6 +59,8 @@ from backend.src.voice_gateway.hermes.stage import (
     last_raw_response,
 )
 from backend.src.voice_gateway.metrics import init_metrics
+from backend.src.voice_gateway.models.hermes_response import HermesResponse
+from backend.src.voice_gateway.pipeline import VoicePipeline
 from backend.src.voice_gateway.stt.base import STTClientError, STTProvider
 from backend.src.voice_gateway.stt.client import OpenAICompatibleSTT
 from backend.src.voice_gateway.tts.base import TTSProvider, TTSProviderError
@@ -94,6 +105,19 @@ def _default_hermes_client() -> HermesClient | None:
     return OpenAICompatibleHermesClient(config, system_prompt=prompt)
 
 
+def _default_agent_client() -> AgentClient | None:
+    try:
+        config = AgentConfig.from_env()
+    except AgentConfigError:
+        return None
+    if config.provider == "codex":
+        try:
+            return CodexAgentClient(config.codex_url, config.codex_token)
+        except ValueError:
+            return None
+    return None
+
+
 def _default_tts_provider() -> TTSProvider | None:
     try:
         config = TTSConfig.from_env(os.environ)
@@ -131,6 +155,7 @@ def create_app(
     stt: STTProvider | None = None,
     hermes: HermesClient | None = None,
     tts: TTSProvider | None = None,
+    agent: AgentClient | None = None,
 ) -> FastAPI:
     """Build the gateway app.
 
@@ -165,14 +190,66 @@ def create_app(
     # config. The endpoint wraps the client once, per app instance; concurrent
     # turns share the stage safely because the raw payload travels through
     # a task-local ContextVar, not an instance attribute.
-    hermes_client = hermes if hermes is not None else _default_hermes_client()
+    try:
+        agent_config = AgentConfig.from_env()
+        provider = agent_config.provider
+    except AgentConfigError:
+        agent_config = None
+        provider = os.environ.get("VOICE_AGENT_PROVIDER", "hermes").strip().lower()
+    if agent is not None:
+        agent_client = agent
+        hermes_client = None
+        provider = "codex"
+    elif agent_config is not None and agent_config.provider == "codex":
+        agent_client = _default_agent_client()
+        hermes_client = None
+    elif agent_config is not None and agent_config.provider == "hermes":
+        agent_client = None
+        hermes_client = hermes if hermes is not None else _default_hermes_client()
+    else:
+        agent_client = None
+        hermes_client = None
     tts_provider = tts if tts is not None else _default_tts_provider()
     hermes_stage = HermesStage(hermes_client) if hermes_client is not None else None
+
+    job_database = os.environ.get("VOICE_JOB_DATABASE", str(root / "voice-jobs.sqlite"))
+    job_store = VoiceJobStore(job_database, root)
+    pipeline = VoicePipeline(stt_provider, agent_client, hermes_stage, tts_provider)
+    job_worker = VoiceJobWorker(job_store, pipeline.run)
+    try:
+        device_tokens = parse_device_tokens(os.environ.get("VOICE_DEVICE_TOKENS"))
+    except ValueError:
+        device_tokens = {}
 
     app = FastAPI(title="Hermes Voice Gateway", version="0.2.0")
     app.state.stt_provider = stt_provider
     app.state.hermes_client = hermes_client
+    app.state.agent_client = agent_client
+    app.state.agent_provider = provider
     app.state.tts_provider = tts_provider
+    app.state.voice_job_store = job_store
+    app.state.voice_job_worker = job_worker
+
+    async def reset_device(device_id: str):
+        if agent_client is None or not hasattr(agent_client, "reset"):
+            raise HTTPException(status_code=503, detail={"error": "agent_reset_unavailable"})
+        await agent_client.reset(device_id)
+
+    install_voice_job_routes(
+        app, job_store, job_worker, device_tokens, reset_device=reset_device
+    )
+
+    @app.on_event("startup")
+    async def start_voice_jobs() -> None:
+        await job_worker.start()
+
+    @app.on_event("shutdown")
+    async def close_agent_client() -> None:
+        await job_worker.close()
+        if agent_client is not None:
+            close = getattr(agent_client, "close", None)
+            if close is not None:
+                await close()
 
     @app.get("/health")
     async def health() -> dict:
@@ -203,6 +280,13 @@ def create_app(
             note_root=os.environ.get("OBSIDIAN_VAULT_PATH"),
             env=os.environ,
         )
+        if provider == "codex" and agent_client is None:
+            payload = report.as_dict()
+            payload["status"] = "not_ready"
+            payload["checks"]["config"] = (
+                "error:CODEX_AGENT_URL or CODEX_AGENT_TOKEN is invalid"
+            )
+            return JSONResponse(status_code=503, content=payload)
         return JSONResponse(
             status_code=200 if report.ready else 503,
             content=report.as_dict(),
@@ -375,7 +459,7 @@ def create_app(
         atomic_write_bytes(turn_dir / "transcript.txt",
                            transcript.text.encode("utf-8"))
 
-        if hermes_stage is None:
+        if hermes_stage is None and agent_client is None and provider == "hermes":
             # STT ran but Hermes is not wired in for this app instance —
             # wiring Hermes in is a separate card's concern. The turn still
             # succeeds; the transcript is archived in both transcript.txt
@@ -399,7 +483,29 @@ def create_app(
         hermes_start = time.perf_counter()
         metrics.active_turns.inc()
         try:
-            response = await hermes_stage.run(transcript.text)
+            if agent_client is not None:
+                agent_reply = await agent_client.complete(
+                    AgentRequest(turn_id, device_id, transcript.text)
+                )
+                note = agent_reply.note or {
+                    "create": False, "title": "", "content": "", "tags": []
+                }
+                response = HermesResponse.model_validate(
+                    {"reply": agent_reply.reply, "note": note}
+                )
+                raw = json.dumps(
+                    {"reply": response.reply, "note": response.note.model_dump()},
+                    ensure_ascii=False,
+                )
+                last_raw_response.set(raw)
+            elif hermes_stage is not None:
+                response = await hermes_stage.run(transcript.text)
+            else:
+                return fail_turn("agent_unavailable", "Codex agent is not configured",
+                                 input_bytes, audio_duration_ms)
+        except AgentClientError as e:
+            return fail_turn(e.code, str(e), input_bytes, audio_duration_ms,
+                             extra={"transcript": transcript.text})
         except HermesStageError as e:
             raw = e.raw  # ORIGINAL text, or None on a transport-level failure
             atomic_write_json(turn_dir / "hermes-response.json",

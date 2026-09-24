@@ -67,15 +67,16 @@ static const char k_html[] =
   "select{flex:1;background:#0f172a;color:#e5e7eb;border:1px solid #334155;border-radius:8px;padding:9px}"
   "</style></head><body><h1>🤖 Hermes StickS3 <span class='muted' id='ip'></span></h1>"
   "<div class='card'><div class='muted'>Network and voice gateway</div>"
+  "<label>Voice protocol</label><select id='protocol' onchange='updateProtocol()'><option value='1'>v1 · synchronous</option><option value='2'>v2 · asynchronous</option></select>"
   "<label>Wi‑Fi network</label><div class='row'><select id='scan'><option value=''>— scan networks —</option></select><button type='button' onclick='scanWifi()'>Scan</button></div>"
   "<label>SSID (required)</label><input id='ssid' autocomplete='off'><label>Password</label><input id='pass' type='password' placeholder='blank keeps saved password'>"
-  "<label>Gateway endpoint (required)</label><input id='url' placeholder='http://192.168.1.10:8080/api/v1/voice/turn'>"
-  "<label>Device token (optional)</label><input id='token' type='password' placeholder='blank keeps saved token'>"
+  "<label>Gateway endpoint (required)</label><input id='url' placeholder='http://192.168.1.10:8080/api/v1/voice/turn'><div class='muted' id='gateway-help'>For v1, use the full /api/v1/voice/turn endpoint.</div>"
+  "<label id='token-label'>Device token (optional)</label><input id='token' type='password' placeholder='blank keeps saved token'>"
   "<button class='save' onclick='saveCfg()'>Save &amp; Restart</button><div class='muted' id='info'></div></div>"
   "<div class='card'><b>Status</b><div id='status' class='muted' style='margin-top:6px'>loading…</div></div>"
-  "<script>const $=x=>document.getElementById(x);async function load(){try{const j=await (await fetch('/config')).json();$('ssid').value=j.wifi_ssid||'';$('url').value=j.gateway_url||'';$('ip').textContent=j.ip&&j.ip!=='0.0.0.0'?'· '+j.ip:'';$('status').textContent=j.wifi_connected?'Wi‑Fi connected · '+j.ip:'Setup access point · '+j.ap_ip;}catch(e){$('status').textContent='status unavailable';}}"
+  "<script>const $=x=>document.getElementById(x);let savedToken=false;function updateProtocol(){const v2=$('protocol').value==='2';$('gateway-help').textContent=v2?'For v2, use only the Gateway base URL, e.g. http://192.168.1.10:8080.':'For v1, use the full /api/v1/voice/turn endpoint.';$('token-label').textContent=v2?'Device token (required for v2)':'Device token (optional)';}async function load(){try{const j=await (await fetch('/config')).json();$('ssid').value=j.wifi_ssid||'';$('url').value=j.gateway_url||'';$('protocol').value=String(j.protocol_version||1);savedToken=!!j.device_token_set;updateProtocol();$('ip').textContent=j.ip&&j.ip!=='0.0.0.0'?'· '+j.ip:'';$('status').textContent=j.wifi_connected?'Wi‑Fi connected · '+j.ip:'Setup access point · '+j.ap_ip;}catch(e){$('status').textContent='status unavailable';}}"
   "async function scanWifi(){const sel=$('scan');sel.replaceChildren(new Option('scanning…',''));try{const j=await (await fetch('/wifi_scan')).json();if(!j.ok&&j.scanning){setTimeout(scanWifi,1000);return;}if(!j.ok)throw new Error('scan failed');sel.replaceChildren(new Option('— select network —',''));for(const n of (j.networks||[])){sel.add(new Option(n.ssid+' ('+n.rssi+' dBm)',n.ssid));}sel.onchange=()=>{if(sel.value)$('ssid').value=sel.value;};}catch(e){sel.replaceChildren(new Option('scan failed',''));}}"
-  "async function saveCfg(){const ssid=$('ssid').value.trim(),url=$('url').value.trim();if(!ssid){$('info').textContent='Enter Wi-Fi network (SSID)';return;}if(!url){$('info').textContent='Enter Gateway endpoint';return;}if(!url.startsWith('http://')&&!url.startsWith('https://')){$('info').textContent='Gateway endpoint must start with http:// or https://';return;}const body=new URLSearchParams({wifi_ssid:ssid,wifi_password:$('pass').value,gateway_url:url,device_token:$('token').value});$('info').textContent='saving…';const r=await fetch('/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});$('info').textContent=r.ok?'saved; restarting…':'save failed';}load();scanWifi();</script></body></html>";
+  "async function saveCfg(){const ssid=$('ssid').value.trim(),url=$('url').value.trim(),protocol=$('protocol').value;if(!ssid){$('info').textContent='Enter Wi-Fi network (SSID)';return;}if(!url){$('info').textContent='Enter Gateway endpoint';return;}if(!url.startsWith('http://')&&!url.startsWith('https://')){$('info').textContent='Gateway endpoint must start with http:// or https://';return;}if(protocol==='2'){if(!$('token').value&&!savedToken){$('info').textContent='Enter the required device token for v2';return;}try{const parsed=new URL(url);if(parsed.pathname!=='/'||parsed.search||parsed.hash){$('info').textContent='For v2, enter the Gateway base URL without a path';return;}}catch(e){$('info').textContent='Enter a valid Gateway base URL';return;}}const body=new URLSearchParams({wifi_ssid:ssid,wifi_password:$('pass').value,gateway_url:url,device_token:$('token').value,protocol_version:protocol});$('info').textContent='saving…';const r=await fetch('/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});$('info').textContent=r.ok?'saved; restarting…':'save failed';}load();scanWifi();</script></body></html>";
 
 static esp_err_t send_json(httpd_req_t *req, const char *body) {
   httpd_resp_set_type(req, "application/json");
@@ -149,7 +150,8 @@ static esp_err_t h_config_get(httpd_req_t *req) {
   used += (size_t)snprintf(body + used, sizeof(body) - used, ",\"device_id\":");
   if (!json_string(body, sizeof(body), &used, s_settings->device_id)) return ESP_FAIL;
   used += (size_t)snprintf(body + used, sizeof(body) - used,
-      ",\"ip\":\"%s\",\"ap_ip\":\"%s\",\"wifi_connected\":%s,\"wifi_password_set\":%s,\"device_token_set\":%s}",
+      ",\"protocol_version\":%ld,\"ip\":\"%s\",\"ap_ip\":\"%s\",\"wifi_connected\":%s,\"wifi_password_set\":%s,\"device_token_set\":%s}",
+      (long)s_settings->protocol_version,
       ip, ap_addr, sta_ip.ip.addr ? "true" : "false",
       s_settings->wifi_password[0] ? "true" : "false",
       s_settings->device_token[0] ? "true" : "false");
@@ -195,7 +197,12 @@ static bool parse_config_form(char *body, voice_settings_t *next) {
       if (!decode_form_component(cursor, (size_t)(equals - cursor), key, sizeof(key)) ||
           !decode_form_component(equals + 1, (size_t)(pair_end - equals - 1), value, sizeof(value))) return false;
       char *dst = NULL; size_t cap = 0;
-      if (strcmp(key, "wifi_ssid") == 0) { dst = next->wifi_ssid; cap = sizeof(next->wifi_ssid); }
+      if (strcmp(key, "protocol_version") == 0) {
+        if (strcmp(value, "1") == 0) next->protocol_version = 1;
+        else if (strcmp(value, "2") == 0) next->protocol_version = 2;
+        else return false;
+      }
+      else if (strcmp(key, "wifi_ssid") == 0) { dst = next->wifi_ssid; cap = sizeof(next->wifi_ssid); }
       else if (strcmp(key, "wifi_password") == 0) { dst = next->wifi_password; cap = sizeof(next->wifi_password); }
       else if (strcmp(key, "gateway_url") == 0) { dst = next->gateway_url; cap = sizeof(next->gateway_url); }
       else if (strcmp(key, "device_token") == 0) { dst = next->device_token; cap = sizeof(next->device_token); }
@@ -205,10 +212,7 @@ static bool parse_config_form(char *body, voice_settings_t *next) {
     }
     cursor = *pair_end ? pair_end + 1 : pair_end;
   }
-  return next->wifi_ssid[0] != '\0' &&
-         (strncmp(next->gateway_url, "http://", 7) == 0 ||
-          strncmp(next->gateway_url, "https://", 8) == 0) &&
-         next->device_id[0] != '\0';
+  return voice_settings_valid(next);
 }
 
 static esp_err_t h_config_post(httpd_req_t *req) {

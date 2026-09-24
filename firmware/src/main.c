@@ -63,11 +63,15 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifdef ESP_PLATFORM
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/stream_buffer.h"
 #include "freertos/task.h"
+#include "esp_random.h"
+#include "esp_timer.h"
 #endif
 
 #include "button_driver.h"
@@ -77,6 +81,8 @@
 #include "board_sticks3.h"
 #include "voice_config_httpd.h"
 #include "voice_settings.h"
+#include "voice_turn_http.h"
+#include "voice_turn_client.h"
 #include "wav_parser.h"
 
 #ifndef VOICE_WIFI_SSID
@@ -103,6 +109,7 @@ typedef struct {
   uint32_t boot_ticks;
   bool error_ack_ready;
   bool error_ack_pressed;
+  bool ignore_button_until_release;
   /* Recording path (spec section 10): network-drain buffer (M2 upload). */
   uint8_t rb_storage[RING_BUFFER_CAPACITY_DEFAULT];
   ring_buffer_t rb;
@@ -139,11 +146,180 @@ typedef struct {
   wav_parser_t wav;
   bool response_eof;
   bool response_valid;
+#ifdef ESP_PLATFORM
+  StreamBufferHandle_t turn_audio_stream;
+  StreamBufferHandle_t turn_upload_stream;
+  voice_turn_http_t turn_http;
+  voice_turn_client_t turn_client;
+  volatile voice_turn_result_t turn_result;
+  volatile bool turn_task_active;
+  volatile bool turn_cancel_requested;
+  volatile bool turn_audio_started;
+  volatile bool turn_upload_active;
+  volatile bool turn_upload_finished;
+  volatile bool turn_upload_release_requested;
+  volatile bool turn_upload_failed;
+  bool turn_http_ready;
+  volatile bool turn_storage_failed;
+  bool turn_pending_byte;
+  uint8_t turn_pending_value;
+#endif
 } app_t;
 
 static app_t app;
 static http_voice_client_t voice_client;
 static voice_settings_t voice_settings;
+
+#ifdef ESP_PLATFORM
+static voice_turn_io_result_t turn_lookup(void *ctx, const char *request_id,
+                                           voice_turn_response_t *response) {
+  app_t *a = ctx;
+  return voice_turn_http_ops()->lookup_request(&a->turn_http, request_id, response);
+}
+static voice_turn_io_result_t turn_poll(void *ctx, const char *turn_id,
+                                         voice_turn_response_t *response) {
+  app_t *a = ctx;
+  return voice_turn_http_ops()->poll_turn(&a->turn_http, turn_id, response);
+}
+static voice_turn_io_result_t turn_download(void *ctx, const char *turn_id,
+                                             voice_turn_response_t *response) {
+  app_t *a = ctx;
+  return voice_turn_http_ops()->download_audio(&a->turn_http, turn_id, response);
+}
+static voice_turn_io_result_t turn_cancel(void *ctx, const char *turn_id) {
+  app_t *a = ctx;
+  return voice_turn_http_ops()->cancel_turn(&a->turn_http, turn_id);
+}
+static bool turn_save_id(void *ctx, const char *turn_id) {
+  app_t *a = ctx;
+  if (strlcpy(voice_settings.turn_id, turn_id,
+              sizeof(voice_settings.turn_id)) >= sizeof(voice_settings.turn_id))
+    return false;
+  if (voice_settings_save(&voice_settings) != ESP_OK) {
+    a->turn_storage_failed = true;
+    return false;
+  }
+  return true;
+}
+static void turn_clear_ids(void *ctx) {
+  app_t *a = ctx;
+  voice_settings.request_id[0] = '\0';
+  voice_settings.turn_id[0] = '\0';
+  if (voice_settings_save(&voice_settings) != ESP_OK) a->turn_storage_failed = true;
+}
+static const voice_turn_ops_t TURN_OPS = {
+  .lookup_request = turn_lookup,
+  .poll_turn = turn_poll,
+  .download_audio = turn_download,
+  .cancel_turn = turn_cancel,
+  .save_turn_id = turn_save_id,
+  .clear_ids = turn_clear_ids,
+};
+
+static void upload_recording(app_t *a) {
+  uint8_t chunk[1024];
+  http_session_init(&a->session);
+  bool open = http_session_open(&a->session);
+  if (!open) a->turn_upload_failed = true;
+  while (open) {
+    if (a->turn_upload_failed) break;
+    size_t count = xStreamBufferReceive(a->turn_upload_stream, chunk,
+                                        sizeof(chunk), pdMS_TO_TICKS(100));
+    if (count) {
+      if (http_session_write(&a->session, chunk, count) != count) {
+        a->turn_upload_failed = true;
+        break;
+      }
+    }
+    if (a->turn_upload_finished &&
+        xStreamBufferBytesAvailable(a->turn_upload_stream) == 0) break;
+  }
+  if (open && !a->turn_upload_failed) {
+    if (!http_session_close(&a->session)) {
+      http_session_abort(&a->session);
+      a->turn_upload_failed = true;
+    } else if (http_voice_client_status(&voice_client) == 202) {
+      const char *turn_id = http_voice_client_turn_id(&voice_client);
+      if (turn_id && turn_id[0] && !turn_save_id(a, turn_id))
+        a->turn_storage_failed = true;
+    }
+  } else if (open) {
+    http_session_abort(&a->session);
+  }
+  a->turn_upload_active = false;
+}
+
+static void turn_worker(void *arg) {
+  app_t *a = arg;
+  if (a->turn_upload_active) {
+    upload_recording(a);
+    if (a->turn_upload_failed) {
+      a->turn_result = VOICE_TURN_FAILED;
+      a->turn_task_active = false;
+      vTaskDelete(NULL);
+      return;
+    }
+  }
+  voice_turn_client_init(&a->turn_client, &TURN_OPS, a,
+      voice_settings.request_id,
+      voice_settings.turn_id[0] ? voice_settings.turn_id : NULL,
+      (uint64_t)(esp_timer_get_time() / 1000ULL));
+  if (a->turn_client.result == VOICE_TURN_FAILED) {
+    a->turn_result = VOICE_TURN_FAILED;
+    a->turn_task_active = false;
+    vTaskDelete(NULL);
+    return;
+  }
+  for (;;) {
+    if (a->turn_cancel_requested && a->turn_client.turn_id[0]) {
+      uint64_t now = (uint64_t)(esp_timer_get_time() / 1000ULL);
+      a->turn_result = voice_turn_client_cancel(&a->turn_client, now);
+      if (a->turn_result != VOICE_TURN_WAITING) break;
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+    uint64_t now = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    a->turn_result = voice_turn_client_tick(&a->turn_client, now);
+    if (a->turn_result != VOICE_TURN_WAITING) break;
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+  a->turn_task_active = false;
+  vTaskDelete(NULL);
+}
+
+static bool start_turn_worker(bool upload_pending) {
+  if (!app.turn_http_ready || !app.turn_audio_stream || !app.turn_upload_stream ||
+      !voice_settings.request_id[0]) return false;
+  if (app.turn_task_active) return true;
+  xStreamBufferReset(app.turn_audio_stream);
+  xStreamBufferReset(app.turn_upload_stream);
+  app.turn_cancel_requested = false;
+  app.turn_audio_started = false;
+  app.turn_pending_byte = false;
+  app.turn_storage_failed = false;
+  app.turn_upload_failed = false;
+  app.turn_upload_finished = !upload_pending;
+  app.turn_upload_release_requested = false;
+  app.turn_upload_active = upload_pending;
+  app.turn_result = VOICE_TURN_WAITING;
+  app.turn_task_active = true;
+  if (xTaskCreate(turn_worker, "voice_turn", 8192, &app, 5, NULL) != pdPASS) {
+    app.turn_task_active = false;
+    return false;
+  }
+  return true;
+}
+
+static bool begin_turn_request(void) {
+  uint8_t random_bytes[16];
+  char request_id[VOICE_TURN_REQUEST_ID_CAPACITY];
+  esp_fill_random(random_bytes, sizeof(random_bytes));
+  if (!voice_turn_format_uuid(random_bytes, request_id, sizeof(request_id))) return false;
+  strlcpy(voice_settings.request_id, request_id, sizeof(voice_settings.request_id));
+  voice_settings.turn_id[0] = '\0';
+  return voice_settings_save(&voice_settings) == ESP_OK;
+}
+#endif
 
 static size_t response_pcm_sink(void *ctx, const uint8_t *data, size_t len) {
   app_t *a = (app_t *)ctx;
@@ -172,12 +348,25 @@ static void enter_state(state_t next, const char* error_what) {
  * overflow flag, so a previous overflow can never leak into a new
  * recording.
  */
-static void recording_start(void) {
+static bool recording_start(void) {
+#ifdef ESP_PLATFORM
+  if (voice_settings.protocol_version == 2 && app.turn_task_active) return false;
+  if (voice_settings.protocol_version == 2 &&
+      !begin_turn_request()) return false;
+#endif
   ring_buffer_reset(&app.rb);
   ring_buffer_reset(&app.playback_rb);
+#ifdef ESP_PLATFORM
+  if (voice_settings.protocol_version == 2) {
+    if (!start_turn_worker(true)) return false;
+    hw_audio_capture_start();
+    return true;
+  }
+#endif
   http_session_init(&app.session);
-  (void)http_session_open(&app.session);
+  if (!http_session_open(&app.session)) return false;
   hw_audio_capture_start();
+  return true;
 }
 
 /*
@@ -205,7 +394,12 @@ static void recording_capture(void) {
   size_t n;
   while ((n = hw_audio_capture_read(chunk, sizeof(chunk))) > 0) {
     ring_buffer_push(&app.rb, chunk, n);
+#ifdef ESP_PLATFORM
+    if (voice_settings.protocol_version != 2)
+      ring_buffer_push(&app.playback_rb, chunk, n);
+#else
     ring_buffer_push(&app.playback_rb, chunk, n);
+#endif
   }
 }
 
@@ -218,10 +412,27 @@ static void recording_capture(void) {
 static void recording_drain(void) {
   uint8_t chunk[256];
   while (!ring_buffer_overflow(&app.rb) && !ring_buffer_empty(&app.rb)) {
-    size_t n = ring_buffer_pop(&app.rb, chunk, sizeof(chunk));
+    size_t limit = sizeof(chunk);
+#ifdef ESP_PLATFORM
+    if (voice_settings.protocol_version == 2) {
+      size_t available = xStreamBufferSpacesAvailable(app.turn_upload_stream);
+      if (!available) return;
+      if (limit > available) limit = available;
+    }
+#endif
+    size_t n = ring_buffer_pop(&app.rb, chunk, limit);
     if (n == 0) {
       break;
     }
+#ifdef ESP_PLATFORM
+    if (voice_settings.protocol_version == 2) {
+      if (xStreamBufferSend(app.turn_upload_stream, chunk, n, 0) != n) {
+        app.turn_upload_failed = true;
+        return;
+      }
+      continue;
+    }
+#endif
     (void)http_session_write(&app.session, chunk, n);
   }
 }
@@ -237,7 +448,17 @@ static void recording_drain(void) {
  */
 static void on_ring_buffer_overflow(void) {
   hw_audio_capture_stop();
+#ifdef ESP_PLATFORM
+  if (voice_settings.protocol_version == 2) {
+    app.turn_upload_failed = true;
+    app.turn_upload_finished = true;
+    app.turn_cancel_requested = true;
+  } else {
+    session_close_or_abort();
+  }
+#else
   session_close_or_abort();
+#endif
   enter_state(STATE_ERROR, "ring buffer overflow");
 }
 
@@ -268,6 +489,9 @@ static void on_ring_buffer_overflow(void) {
 static void playback_release_resources(void) {
   hw_audio_playback_stop();
   ring_buffer_reset(&app.playback_rb);
+#ifdef ESP_PLATFORM
+  app.turn_pending_byte = false;
+#endif
   app.playback_pending_len = 0;
   app.playback_position = 0;
 }
@@ -286,6 +510,9 @@ static void playback_release_resources(void) {
  *      exactly like the ring-buffer-overflow path already does.
  */
 static void on_playback_error(const char* what) {
+#ifdef ESP_PLATFORM
+  if (voice_settings.protocol_version == 2) app.turn_cancel_requested = true;
+#endif
   playback_release_resources();
   enter_state(STATE_ERROR, what);
 }
@@ -337,6 +564,31 @@ static void playback_drain(void) {
   }
 }
 
+#ifdef ESP_PLATFORM
+static bool turn_playback_drain(void) {
+  uint8_t audio[1025];
+  size_t prefix = 0;
+  if (app.turn_pending_byte) {
+    audio[0] = app.turn_pending_value;
+    prefix = 1;
+    app.turn_pending_byte = false;
+  }
+  size_t received = xStreamBufferReceive(app.turn_audio_stream,
+      audio + prefix, sizeof(audio) - prefix, 0);
+  size_t total = prefix + received;
+  if (total & 1u) {
+    app.turn_pending_byte = true;
+    app.turn_pending_value = audio[total - 1];
+    total--;
+  }
+  if (!total) return true;
+  size_t written = hw_audio_playback_write(audio, total);
+  if (written != total) return false;
+  app.playback_position += written;
+  return true;
+}
+#endif
+
 /* True once every captured byte has been handed to the speaker AND the
  * hardware confirms it actually finished playing them (not just queued). */
 static bool playback_finished(void) {
@@ -357,6 +609,7 @@ void app_init(void) {
   app.boot_ticks = 0;
   app.error_ack_ready = false;
   app.error_ack_pressed = false;
+  app.ignore_button_until_release = false;
   ring_buffer_init(&app.rb, app.rb_storage, RING_BUFFER_CAPACITY_DEFAULT);
   ring_buffer_init(&app.playback_rb, app.playback_storage,
                     RING_BUFFER_CAPACITY_DEFAULT);
@@ -369,6 +622,27 @@ void app_init(void) {
   http_session_init(&app.session);
 #ifdef ESP_PLATFORM
   (void)voice_settings_load(&voice_settings);
+  app.turn_task_active = false;
+  app.turn_cancel_requested = false;
+  app.turn_audio_started = false;
+  app.turn_upload_active = false;
+  app.turn_upload_finished = false;
+  app.turn_upload_failed = false;
+  app.turn_result = VOICE_TURN_FAILED;
+  app.turn_http_ready = false;
+  app.turn_storage_failed = false;
+  app.turn_pending_byte = false;
+  if (voice_settings.protocol_version == 2) {
+    app.turn_audio_stream = xStreamBufferCreate(8192, 1);
+    app.turn_upload_stream = xStreamBufferCreate(8192, 1);
+    if (app.turn_audio_stream && app.turn_upload_stream &&
+        voice_settings_valid(&voice_settings)) {
+      app.turn_http_ready = voice_turn_http_init(&app.turn_http,
+          voice_settings.gateway_url, voice_settings.device_id,
+          voice_settings.device_token, app.turn_audio_stream,
+          &app.turn_cancel_requested, &app.turn_audio_started);
+    }
+  }
   uint8_t sta_mac[6];
   ESP_ERROR_CHECK(esp_read_mac(sta_mac, ESP_MAC_WIFI_STA));
   voice_settings_set_device_id_from_mac(&voice_settings, sta_mac);
@@ -386,7 +660,9 @@ void app_init(void) {
       .url = voice_settings.gateway_url,
       .device_id = voice_settings.device_id,
       .token = voice_settings.device_token[0] ? voice_settings.device_token : NULL,
-      .timeout_ms = 15000,
+      .timeout_ms = voice_settings.protocol_version == 2 ? 5000 : 15000,
+      .protocol_version = voice_settings.protocol_version,
+      .request_id = voice_settings.request_id,
   };
   if (http_voice_client_init(&voice_client, &cfg) == 0)
     http_session_bind_transport(&app.session, http_voice_client_transport(&voice_client));
@@ -467,15 +743,31 @@ void app_tick(void) {
   switch (s) {
     case STATE_BOOT:
       if (++app.boot_ticks >= APP_BOOT_TICKS) {
+#ifdef ESP_PLATFORM
+        if (voice_settings.protocol_version == 2 && voice_settings.request_id[0]) {
+          if (start_turn_worker(false)) enter_state(STATE_PROCESSING, NULL);
+          else enter_state(STATE_ERROR, "could not resume saved voice turn");
+        } else {
+          enter_state(STATE_IDLE, NULL);
+        }
+#else
         enter_state(STATE_IDLE, NULL);
+#endif
       }
       break;
 
     case STATE_IDLE: {
+      if (app.ignore_button_until_release) {
+        if (!hw_button_raw()) {
+          app.ignore_button_until_release = false;
+          button_reset(&app.btn);
+        }
+        break;
+      }
       button_event_t ev = button_poll(&app.btn, hw_button_raw(), now);
       if (ev == BUTTON_EVENT_PRESSED) {
-        recording_start();
-        enter_state(STATE_RECORDING, NULL);
+        if (recording_start()) enter_state(STATE_RECORDING, NULL);
+        else enter_state(STATE_ERROR, "voice recording start failed");
       }
       break;
     }
@@ -491,6 +783,14 @@ void app_tick(void) {
         on_ring_buffer_overflow();
         break;
       }
+#ifdef ESP_PLATFORM
+      if (voice_settings.protocol_version == 2 &&
+          app.turn_result == VOICE_TURN_FAILED && !app.turn_task_active) {
+        hw_audio_capture_stop();
+        enter_state(STATE_ERROR, "voice upload failed");
+        break;
+      }
+#endif
       recording_capture();
       recording_drain();
       button_event_t ev = button_poll(&app.btn, hw_button_raw(), now);
@@ -506,7 +806,13 @@ void app_tick(void) {
         hw_audio_capture_stop();
         session_close_or_abort();
 #ifdef ESP_PLATFORM
-        if (http_voice_client_status(&voice_client) != 200) {
+        if (voice_settings.protocol_version == 2) {
+          app.turn_upload_release_requested = true;
+          if (!voice_settings.request_id[0] || !app.turn_task_active) {
+            enter_state(STATE_ERROR, "could not resume voice turn");
+            break;
+          }
+        } else if (http_voice_client_status(&voice_client) != 200) {
           enter_state(STATE_ERROR, "voice gateway returned non-200");
           break;
         }
@@ -524,6 +830,27 @@ void app_tick(void) {
        * backend" condition lands with the M2 network wiring.
        */
 #ifdef ESP_PLATFORM
+      if (voice_settings.protocol_version == 2) {
+        if (app.turn_upload_release_requested && !app.turn_upload_finished) {
+          recording_drain();
+          if (ring_buffer_empty(&app.rb)) app.turn_upload_finished = true;
+        }
+        button_event_t event = button_poll(&app.btn, hw_button_raw(), now);
+        if (event == BUTTON_EVENT_PRESSED) app.turn_cancel_requested = true;
+        if (app.turn_storage_failed || app.turn_result == VOICE_TURN_FAILED) {
+          if (app.turn_task_active) app.turn_cancel_requested = true;
+          enter_state(STATE_ERROR, "voice turn failed");
+        } else if (app.turn_result == VOICE_TURN_CANCELLED) {
+          app.ignore_button_until_release = true;
+          playback_release_resources();
+          enter_state(STATE_IDLE, NULL);
+        } else if (app.turn_audio_started) {
+          app.playback_position = 0;
+          hw_audio_playback_start(NULL, 0);
+          enter_state(STATE_PLAYING, NULL);
+        }
+        break;
+      }
       ring_buffer_reset(&app.playback_rb);
       app.response_eof = false;
       app.response_valid = false;
@@ -557,6 +884,36 @@ void app_tick(void) {
         on_playback_error("playback malformed WAV header");
         break;
       }
+#ifdef ESP_PLATFORM
+      if (voice_settings.protocol_version == 2) {
+        if (app.turn_result == VOICE_TURN_FAILED || app.turn_storage_failed) {
+          on_playback_error("voice turn failed during audio");
+          break;
+        }
+        if (app.turn_result == VOICE_TURN_CANCELLED) {
+          app.ignore_button_until_release = true;
+          playback_release_resources();
+          enter_state(STATE_IDLE, NULL);
+          break;
+        }
+        if (!turn_playback_drain()) {
+          on_playback_error("speaker rejected v2 audio");
+          break;
+        }
+        if (app.turn_result == VOICE_TURN_READY &&
+            xStreamBufferBytesAvailable(app.turn_audio_stream) == 0) {
+          if (app.turn_pending_byte) {
+            on_playback_error("odd-length v2 audio");
+            break;
+          }
+          if (hw_audio_playback_drained()) {
+            playback_release_resources();
+            enter_state(STATE_IDLE, NULL);
+          }
+        }
+        break;
+      }
+#endif
       /* Pull one bounded response chunk before draining the speaker queue. */
 #ifdef ESP_PLATFORM
       if (!app.response_eof) {
@@ -616,7 +973,12 @@ void app_tick(void) {
       } else if (ev == BUTTON_EVENT_PRESSED) {
         app.error_ack_pressed = true;
       } else if (ev == BUTTON_EVENT_RELEASED && app.error_ack_pressed) {
+#ifdef ESP_PLATFORM
+        if (voice_settings.protocol_version != 2 || !app.turn_task_active)
+          enter_state(STATE_IDLE, NULL);
+#else
         enter_state(STATE_IDLE, NULL);
+#endif
       }
       break;
     }
@@ -632,7 +994,14 @@ static void voice_main_loop(void) {
   app_init();
   for (;;) {
     app_tick();
-    board_sticks3_display_update(app_state(), hw_clock_ms());
+    screen_processing_phase_t phase = SCREEN_PROCESSING_THINKING;
+#ifdef ESP_PLATFORM
+    if (app.turn_client.status == VOICE_TURN_STATUS_TRANSCRIBING)
+      phase = SCREEN_PROCESSING_TRANSCRIBING;
+    else if (app.turn_client.status == VOICE_TURN_STATUS_SYNTHESIZING)
+      phase = SCREEN_PROCESSING_SYNTHESIZING;
+#endif
+    board_sticks3_display_update(app_state(), hw_clock_ms(), phase);
     /* Keep the USB/Wi-Fi/I2S system tasks and watchdog serviced. */
     vTaskDelay(pdMS_TO_TICKS(10));
   }

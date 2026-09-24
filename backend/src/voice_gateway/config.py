@@ -40,6 +40,33 @@ class STTConfigError(ValueError):
     """Invalid STT configuration (missing or malformed environment values)."""
 
 
+class AgentConfigError(ValueError):
+    """Invalid voice-agent provider configuration."""
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    provider: str
+    codex_url: str = ""
+    codex_token: str = ""
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "AgentConfig":
+        source = os.environ if env is None else env
+        provider = source.get("VOICE_AGENT_PROVIDER", "hermes").strip().lower()
+        if provider not in {"hermes", "codex"}:
+            raise AgentConfigError("VOICE_AGENT_PROVIDER must be hermes or codex")
+        if provider == "hermes":
+            return cls(provider)
+        url = source.get("CODEX_AGENT_URL", "").strip()
+        token = source.get("CODEX_AGENT_TOKEN", "").strip()
+        if not url:
+            raise AgentConfigError("CODEX_AGENT_URL is required for Codex provider")
+        if not token:
+            raise AgentConfigError("CODEX_AGENT_TOKEN is required for Codex provider")
+        return cls(provider, url, token)
+
+
 @dataclass(frozen=True)
 class HermesConfig:
     """Immutable Hermes endpoint settings."""

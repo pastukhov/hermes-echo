@@ -144,11 +144,11 @@ SQLite gateway лежит в существующем archive volume. Один w
 
 **Interfaces:** `CodexRuntime.start()`, `start_thread() -> str`, `resume_thread(thread_id)`, `run(thread_id, prompt) -> str`, `interrupt(thread_id)`, `close()`. Это обёртка проекта; остальные компоненты не используют SDK напрямую.
 
-- [ ] Создать отдельный venv на Python 3.12; установить `openai-codex==0.156.1`, закрепить остальные зависимости и записать фактическую версию bundled runtime. Не менять глобальную установку Codex.
-- [ ] Проверить документацию и сигнатуры установленного SDK для resume, event stream, interrupt, account/model discovery и запроса разрешений. Записать их в комментариях к `runtime.py`; version-specific код оставить только здесь.
-- [ ] Поддельным SDK воспроизвести: финальный ответ, auth error, quota error, timeout и разрешение инструмента. `test_timeout_interrupts_remote_turn` обязан проверить вызов interrupt до очистки локального task; `test_permission_request_is_not_auto_approved` — отказ и конечный `permission_required`.
-- [ ] Реализовать lifespan-обёртку с одним процессом SDK и read-only профилем. Конфигурацию модели разрешать до первого запроса; не начинать fallback при недоступной модели.
-- [ ] Запустить `pytest -q agent_service/tests/test_runtime.py` в новом venv. Затем один реальный текстовый smoke: ответ на «Проверка связи, ответь одним словом»; сохранить version/model/provider, продолжительность и итог без credentials.
+- [x] Создать отдельный venv на Python 3.12; установить `openai-codex==0.156.1`, закрепить остальные зависимости и записать фактическую версию bundled runtime. Не менять глобальную установку Codex.
+- [x] Проверить документацию и сигнатуры установленного SDK для resume, event stream, interrupt, account/model discovery и запроса разрешений. Version-specific код оставлен в `runtime.py`; provider auth requirement не используется как доказательство пользовательского login.
+- [x] Поддельным SDK воспроизвести: финальный ответ, auth error, quota error, timeout и разрешение инструмента. `test_timeout_interrupts_remote_turn` проверяет вызов interrupt до очистки локального task; `test_permission_request_is_not_auto_approved` — отказ и конечный `permission_required`.
+- [x] Реализовать lifespan-обёртку с одним процессом SDK и read-only профилем. Конфигурацию модели разрешать до первого запроса; не начинать fallback при недоступной модели.
+- [x] Запустить `pytest -q agent_service/tests/test_runtime.py` в отдельном venv: 9 passed. Реальный текстовый smoke успешен: provider `codex`, SDK/runtime `0.156.1`, model `gpt-6-astra`, 6455 ms, ответ «Работает»; credentials не записывались.
 
 **Готово:** SDK отвечает из отдельного host-процесса с выбранной учётной записью; interruption и ошибки имеют проверенный контракт. Если SDK не способен безопасно остановить turn, дальше не переходить до решения этой несовместимости.
 
@@ -233,13 +233,13 @@ Fixtures выдают одно корректное PCM, валидные device
 
 **Interfaces:** `voice_turn_begin(request_id)`, `voice_turn_write(pcm, len)`, `voice_turn_finish() -> turn_id`, `voice_turn_poll() -> status`, `voice_turn_audio_read(buf, cap)`, `voice_turn_cancel()`. State machine вызывает общий клиент через hardware/transport seam; функции ESP HTTP не входят в native-тесты.
 
-- [ ] Добавить явную сохранённую настройку `protocol_version` со значением по умолчанию 1. Для v2 setup принимает gateway base URL и обязательный token; не угадывать версию по HTTP 404 и не обрезать произвольные URL.
-- [ ] Генерировать UUID request ID один раз на нажатие и сохранять его перед загрузкой. После `202` переходить в PROCESSING и опрашивать status. При потере `202` или перезапуске использовать request lookup; не повторять несохранённую аудиозапись. UUID turn ID сохранять для возобновления ожидания, удалять вместе с request ID после terminal state без записи NVS на каждый poll.
-- [ ] Реализовать отображение `РАСПОЗНАЮ`, `ДУМАЮ`, `ГОТОВЛЮ ОТВЕТ` существующим Montserrat. KEY1 во время ожидания отменяет текущий turn; новая запись начинается отдельным нажатием. ERROR остаётся до отдельного подтверждения, как уже потребовал пользователь.
-- [ ] Сетевой обмен вынести в worker/task, чтобы пятисекундный timeout не блокировал кнопку и экран. На host fake clock проверить poll 1 sec, retry 1/2/4/5 sec, отсутствие busy loop и общий deadline.
-- [ ] До запуска playback проверить `200` и audio Content-Type; затем WAV format. JSON ошибки, `202`, `409`, `401` никогда не передавать в audio sink.
-- [ ] Native сценарии: delayed ready >15 sec, потерянный 202, краткий обрыв Wi-Fi, server restart, cancel, невалидный WAV, premature EOF, повторный цикл; тест busy/error не должен начинать новую запись тем же нажатием.
-- [ ] Выполнить из `firmware`: `rtk proxy /home/artem/platformio/.venv/bin/platformio test -e native`, затем `rtk proxy /home/artem/platformio/.venv/bin/platformio run -e sticks3`.
+- [x] Добавить явную сохранённую настройку `protocol_version` со значением по умолчанию 1. Для v2 setup принимает gateway base URL и обязательный token; не угадывать версию по HTTP 404 и не обрезать произвольные URL.
+- [x] Генерировать UUID request ID один раз на нажатие и сохранять его перед загрузкой. После `202` переходить в PROCESSING и опрашивать status. При потере `202` или перезапуске использовать request lookup; не повторять несохранённую аудиозапись. UUID turn ID сохранять для возобновления ожидания, удалять вместе с request ID после terminal state без записи NVS на каждый poll.
+- [x] Реализовать отображение этапов (`СЛЫШУ / РАСПОЗНАЮ РЕЧЬ`, `ДУМАЮ`, `ГОТОВЛЮ / ОТВЕТ`) существующим Montserrat. KEY1 во время ожидания отменяет текущий turn; новая запись начинается отдельным нажатием. ERROR остаётся до отдельного подтверждения.
+- [x] Сетевой обмен вынести в worker/task, чтобы пятисекундный timeout не блокировал кнопку и экран. На host fake clock проверить poll 1 sec, retry 1/2/4/5 sec, отсутствие busy loop и общий deadline.
+- [x] До запуска playback проверить `200` и audio Content-Type; затем WAV format. JSON ошибки, `202`, `409`, `401` никогда не передавать в audio sink.
+- [x] Native сценарии: delayed ready >15 sec, потерянный 202/request lookup, краткий обрыв Wi-Fi через retry, server restart lookup, cancel, невалидный WAV, premature EOF, повторный цикл; ERROR подтверждается отдельным нажатием.
+- [x] Выполнить из `firmware`: `rtk proxy /home/artem/platformio/.venv/bin/platformio test -e native`, затем `rtk proxy /home/artem/platformio/.venv/bin/platformio run -e sticks3`.
 
 **Готово:** прошивка собирается, v1 работает прежним образом, v2 проходит host сценарии ожидания и отмены без изменения аудиодрайвера.
 

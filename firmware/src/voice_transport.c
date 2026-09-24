@@ -1,7 +1,10 @@
 #include "voice_transport.h"
 
 voice_transport_result_t voice_transport_begin(voice_transport_t *t) {
-  if (!t || !t->ops || !t->ops->begin || t->begun) return VOICE_TRANSPORT_FATAL;
+  if (!t || !t->ops || !t->ops->begin || (t->begun && !t->finished))
+    return VOICE_TRANSPORT_FATAL;
+  if (t->begun) voice_transport_abort(t);
+  t->finished = 0;
   voice_transport_result_t r = t->ops->begin(t);
   if (r == VOICE_TRANSPORT_OK) t->begun = 1;
   return r;

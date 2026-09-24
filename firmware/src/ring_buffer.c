@@ -57,7 +57,10 @@ size_t ring_buffer_pop(ring_buffer_t* rb, uint8_t* out, size_t len) {
   if (chunk > rb->count) {
     chunk = rb->count;
   }
-  memcpy(out, &rb->data[rb->head], chunk);
+  size_t before_wrap = rb->capacity - rb->head;
+  size_t first = chunk < before_wrap ? chunk : before_wrap;
+  memcpy(out, &rb->data[rb->head], first);
+  if (chunk > first) memcpy(out + first, rb->data, chunk - first);
   rb->head = (rb->head + chunk) & (rb->capacity - 1);
   rb->count -= chunk;
   return chunk;

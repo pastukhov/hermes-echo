@@ -61,6 +61,7 @@ static void test_playback_repeated_cycles_no_resource_accumulation(void);
 static void test_playback_occupancy_reaches_zero_after_drain_time(void);
 static void test_playback_occupancy_edge_cases(void);
 static void test_transport_finish_keeps_response_socket(void);
+static void test_transport_reopens_after_completed_response(void);
 static void test_setup_access_subnet_filter(void);
 static void test_setup_access_ipv4_mapped_ipv6_filter(void);
 static void tick_to(uint32_t target_ms);
@@ -101,6 +102,34 @@ static void test_mac_replaces_saved_device_id(void) {
   const uint8_t mac[6] = {0x7c, 0xe8, 0xb1, 0xe4, 0xb7, 0x80};
   voice_settings_set_device_id_from_mac(&settings, mac);
   TEST_ASSERT_EQUAL_STRING("7ce8b1e4b780", settings.device_id);
+}
+
+static void test_protocol_defaults_to_legacy_v1(void) {
+  voice_settings_t settings = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, voice_settings_load(&settings));
+  TEST_ASSERT_EQUAL_INT(1, settings.protocol_version);
+}
+
+static void test_boot_can_resume_a_saved_voice_turn(void) {
+  state_machine_t sm;
+  state_machine_init(&sm);
+  TEST_ASSERT_TRUE(state_machine_step(&sm, STATE_PROCESSING));
+  TEST_ASSERT_EQUAL(STATE_PROCESSING, state_machine_get_state(&sm));
+}
+
+static void test_v2_settings_require_device_token_and_base_url(void) {
+  voice_settings_t settings = {0};
+  strcpy(settings.wifi_ssid, "Atitlan");
+  strcpy(settings.gateway_url, "http://192.168.1.10:8080");
+  strcpy(settings.device_id, "7ce8b1e4b780");
+  settings.protocol_version = 2;
+  TEST_ASSERT_FALSE(voice_settings_valid(&settings));
+  strcpy(settings.device_token, "device-secret");
+  TEST_ASSERT_TRUE(voice_settings_valid(&settings));
+  strcpy(settings.gateway_url, "http://192.168.1.10:8080/api/v1/voice/turn");
+  TEST_ASSERT_FALSE(voice_settings_valid(&settings));
+  strcpy(settings.gateway_url, "http://user@192.168.1.10:8080");
+  TEST_ASSERT_FALSE(voice_settings_valid(&settings));
 }
 
 static void test_mac_keeps_leading_zeros(void) {
@@ -270,10 +299,14 @@ int main(void) {
   RUN_TEST(test_playback_occupancy_reaches_zero_after_drain_time);
   RUN_TEST(test_playback_occupancy_edge_cases);
   RUN_TEST(test_transport_finish_keeps_response_socket);
+  RUN_TEST(test_transport_reopens_after_completed_response);
   RUN_TEST(test_setup_access_subnet_filter);
   RUN_TEST(test_setup_access_ipv4_mapped_ipv6_filter);
   RUN_TEST(test_error_stays_until_fresh_button_tap);
   RUN_TEST(test_mac_replaces_saved_device_id);
+  RUN_TEST(test_protocol_defaults_to_legacy_v1);
+  RUN_TEST(test_boot_can_resume_a_saved_voice_turn);
+  RUN_TEST(test_v2_settings_require_device_token_and_base_url);
   RUN_TEST(test_mac_keeps_leading_zeros);
   RUN_TEST(test_setup_ap_waits_a_minute_while_disconnected);
   RUN_TEST(test_setup_ap_is_immediate_without_credentials);
@@ -949,6 +982,32 @@ static void test_transport_finish_keeps_response_socket(void) {
   TEST_ASSERT_EQUAL_INT(1, probe.finishes);
   TEST_ASSERT_EQUAL_INT(1, probe.polls);
   TEST_ASSERT_EQUAL_INT(0, probe.aborted);
+}
+
+static void test_transport_reopens_after_completed_response(void) {
+  transport_probe_t probe = {0};
+  const voice_transport_ops_t ops = {probe_begin, probe_write, probe_finish, probe_poll, probe_abort};
+  voice_transport_t transport = {.ops = &ops, .ctx = &probe};
+  http_session_t session = {0};
+  uint8_t pcm = 0, response = 0;
+  size_t got = 0;
+
+  http_session_bind_transport(&session, &transport);
+  http_session_init(&session);
+  TEST_ASSERT_TRUE(http_session_open(&session));
+  TEST_ASSERT_EQUAL_UINT(1, http_session_write(&session, &pcm, 1));
+  TEST_ASSERT_TRUE(http_session_close(&session));
+  TEST_ASSERT_EQUAL(VOICE_TRANSPORT_EOF,
+                    http_session_poll(&session, &response, 1, &got));
+  TEST_ASSERT_EQUAL_INT(0, probe.aborted);
+
+  http_session_init(&session);
+  TEST_ASSERT_TRUE(http_session_open(&session));
+  TEST_ASSERT_EQUAL_UINT(1, http_session_write(&session, &pcm, 1));
+  TEST_ASSERT_TRUE(http_session_close(&session));
+  TEST_ASSERT_EQUAL_INT(2, probe.begins);
+  TEST_ASSERT_EQUAL_INT(2, probe.finishes);
+  TEST_ASSERT_EQUAL_INT(1, probe.aborted);
 }
 
 static uint32_t test_ipv4(const char *text) {

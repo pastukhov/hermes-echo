@@ -87,11 +87,34 @@ void test_montserrat_copy_fits_screen_without_clipping(void) {
   }
 }
 
+void test_processing_screen_names_each_backend_stage(void) {
+  screen_ui_view_t transcribing = screen_ui_view_with_phase(
+      STATE_PROCESSING, SCREEN_PROCESSING_TRANSCRIBING);
+  screen_ui_view_t thinking = screen_ui_view_with_phase(
+      STATE_PROCESSING, SCREEN_PROCESSING_THINKING);
+  screen_ui_view_t synthesizing = screen_ui_view_with_phase(
+      STATE_PROCESSING, SCREEN_PROCESSING_SYNTHESIZING);
+  TEST_ASSERT_EQUAL_STRING("СЛЫШУ", transcribing.title);
+  TEST_ASSERT_EQUAL_STRING("РАСПОЗНАЮ РЕЧЬ", transcribing.hint);
+  TEST_ASSERT_EQUAL_STRING("ДУМАЮ", thinking.title);
+  TEST_ASSERT_EQUAL_STRING("ГОТОВЛЮ", synthesizing.title);
+  TEST_ASSERT_EQUAL_STRING("ОТВЕТ", synthesizing.hint);
+  TEST_ASSERT_LESS_OR_EQUAL_INT(115,
+      screen_font_measure(SCREEN_FONT_TITLE, transcribing.title));
+  TEST_ASSERT_LESS_OR_EQUAL_INT(115,
+      screen_font_measure(SCREEN_FONT_TITLE, synthesizing.title));
+  TEST_ASSERT_LESS_OR_EQUAL_INT(115,
+      screen_font_measure(SCREEN_FONT_HINT, transcribing.hint));
+  TEST_ASSERT_LESS_OR_EQUAL_INT(115,
+      screen_font_measure(SCREEN_FONT_HINT, synthesizing.hint));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_each_voice_state_has_clear_screen_copy_and_accent);
   RUN_TEST(test_montserrat_draws_cyrillic_letters_distinctly);
   RUN_TEST(test_montserrat_draws_every_digit_of_device_id);
   RUN_TEST(test_montserrat_copy_fits_screen_without_clipping);
+  RUN_TEST(test_processing_screen_names_each_backend_stage);
   return UNITY_END();
 }

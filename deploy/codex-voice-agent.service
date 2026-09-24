@@ -1,0 +1,20 @@
+[Unit]
+Description=Codex Python SDK voice agent for Hermes Echo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/hermes-echo/agent_service
+EnvironmentFile=%h/.config/hermes-echo/codex-voice-agent.env
+Environment=CODEX_VOICE_CWD=%h/hermes-echo
+Environment=CODEX_AGENT_DATABASE=%h/.local/state/hermes-echo/codex-voice/agent.sqlite3
+UMask=0077
+ExecStart=%h/hermes-echo/agent_service/.venv/bin/uvicorn codex_voice.app:create_app --factory --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

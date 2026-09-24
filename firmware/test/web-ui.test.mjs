@@ -13,7 +13,7 @@ assert.ok(script, 'setup page has a script');
 
 async function openSetupPage() {
   const elements = Object.fromEntries(
-    ['scan', 'ssid', 'pass', 'url', 'token', 'ip', 'status', 'info'].map(id => [id, { value: '', textContent: '' }]),
+    ['scan', 'ssid', 'pass', 'url', 'token', 'protocol', 'ip', 'status', 'info', 'gateway-help', 'token-label'].map(id => [id, { value: '', textContent: '' }]),
   );
   const select = elements.scan;
   select.options = [];
@@ -25,10 +25,11 @@ async function openSetupPage() {
     document: { getElementById: id => elements[id] },
     Option: class { constructor(text, value) { this.text = text; this.value = value; } },
     URLSearchParams,
+    URL,
     fetch: async (path, options) => {
       requested.push({ path, options });
       return { json: async () => path === '/config'
-        ? { wifi_ssid: '', gateway_url: '', device_id: '', ip: '0.0.0.0', ap_ip: '192.168.4.1' }
+        ? { wifi_ssid: '', gateway_url: '', device_id: '', protocol_version: 1, device_token_set: false, ip: '0.0.0.0', ap_ip: '192.168.4.1' }
         : { ok: true, scanning: false, networks: [{ ssid: 'Atitlan', rssi: -52 }] } };
     },
     setInterval: callback => { intervals.push(callback); },
@@ -75,4 +76,31 @@ test('setup page saves without an editable Device ID', async () => {
   const post = requested.find(request => request.options?.method === 'POST');
   assert.ok(post, 'settings are submitted without a Device ID field');
   assert.equal(post.options.body.has('device_id'), false);
+});
+
+test('setup defaults to protocol v1 and explains the endpoint format', async () => {
+  const { elements } = await openSetupPage();
+  assert.equal(elements.protocol.value, '1');
+  assert.match(elements['gateway-help'].textContent, /api\/v1/i);
+});
+
+test('setup submits v2 only with a device token and an origin URL', async () => {
+  const { elements, requested, context } = await openSetupPage();
+  elements.scan.value = 'Atitlan';
+  elements.scan.onchange();
+  elements.url.value = 'http://gateway.local:8080';
+  elements.protocol.value = '2';
+  await context.saveCfg();
+  assert.match(elements.info.textContent, /token/i);
+  assert.equal(requested.some(request => request.options?.method === 'POST'), false);
+
+  elements.token.value = 'device-token';
+  await context.saveCfg();
+  const post = requested.find(request => request.options?.method === 'POST');
+  assert.ok(post);
+  assert.equal(post.options.body.get('protocol_version'), '2');
+
+  elements.url.value = 'http://gateway.local:8080/api/v1/voice/turn';
+  await context.saveCfg();
+  assert.match(elements.info.textContent, /base url/i);
 });

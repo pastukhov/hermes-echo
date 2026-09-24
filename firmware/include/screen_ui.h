@@ -12,6 +12,12 @@ typedef enum {
   SCREEN_ICON_ERROR
 } screen_icon_t;
 
+typedef enum {
+  SCREEN_PROCESSING_TRANSCRIBING,
+  SCREEN_PROCESSING_THINKING,
+  SCREEN_PROCESSING_SYNTHESIZING,
+} screen_processing_phase_t;
+
 typedef struct {
   const char *title;
   const char *hint;
@@ -20,5 +26,7 @@ typedef struct {
 } screen_ui_view_t;
 
 screen_ui_view_t screen_ui_view(state_t state);
+screen_ui_view_t screen_ui_view_with_phase(state_t state,
+                                           screen_processing_phase_t phase);
 
 #endif

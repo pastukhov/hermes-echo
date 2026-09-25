@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -74,7 +75,17 @@ class KnowledgeStore:
 
     @contextmanager
     def _locked(self):
-        with (self.state / "writer.lock").open("a") as lock:
+        # Share this lock with the host Git publisher. Keep its inode stable.
+        queue = self._path(".sync")
+        if not self.root.exists():
+            self.root.mkdir(mode=0o2770)
+        if not queue.exists():
+            queue.mkdir(mode=0o2770)
+            queue.chmod(0o2770)
+        descriptor = os.open(queue / "writer.lock", os.O_CREAT | os.O_RDWR, 0o660)
+        if os.fstat(descriptor).st_uid == os.getuid():
+            os.fchmod(descriptor, 0o660)
+        with os.fdopen(descriptor, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             db = sqlite3.connect(self.db_path, isolation_level=None)
             os.chmod(self.db_path, 0o600)
@@ -298,6 +309,14 @@ class KnowledgeStore:
                 spoken = f'Сохранил задание «{note.title}». Для запуска нужен целевой репозиторий.'
             receipt = {"reply": spoken, "source_id": source_id, "idea_id": idea,
                        "operation": operation, "pages": [c["path"] for c in changes]}
+            files = {"Hermes/" + change["path"]: digest(change["after"].encode()) for change in changes}
+            for relative in (f"sources/{source_id}.md", "schema.md"):
+                files["Hermes/" + relative] = digest(self._read(relative))
+            # Last journal write: host cannot observe an outbox item before all
+            # published files exist. Recovery replays this write as well.
+            changes.append({"path": f".sync/{source_id}.json", "before": None,
+                            "after": json.dumps({"id": source_id, "created_ns": time.time_ns(),
+                                                 "files": files}, ensure_ascii=False)})
             db.execute("INSERT INTO commits VALUES (?, ?, ?, 'pending', ?, ?)",
                        (source_id, device, idea if operation in ("capture", "amend") else target,
                         json.dumps(changes, ensure_ascii=False), json.dumps(receipt, ensure_ascii=False)))

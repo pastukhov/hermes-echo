@@ -145,3 +145,15 @@ def test_lint_detects_broken_links_without_reading_raw_as_instructions(store):
     with (store.root / 'index.md').open('a') as output:
         output.write('\n[[Hermes/wiki/concepts/missing]]\n')
     assert lint(store.vault)[0]['kind'] == 'broken_link'
+
+
+def test_publication_emits_git_outbox_after_files_with_exact_hashes(store):
+    import hashlib
+    source, context, _ = capture(store)
+    store.publish(source, 'mic', note(source), context, '')
+    task = json.loads((store.root / f'.sync/{source}.json').read_text())
+    assert f'Hermes/sources/{source}.md' in task['files']
+    assert 'Hermes/schema.md' in task['files']
+    for path, expected in task['files'].items():
+        assert hashlib.sha256((store.vault / path).read_bytes()).hexdigest() == expected
+    assert (store.root / '.sync/writer.lock').exists()

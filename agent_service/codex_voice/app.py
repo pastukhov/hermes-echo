@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from .git_sync import GitSync
 from .config import RuntimeConfig
 from .runtime import CodexRuntime, RuntimeFailure
 from .service import AgentReply, AgentRequest, AgentService, AgentServiceError
@@ -46,6 +48,9 @@ def create_app(
         runtime = CodexRuntime(config)
         service = AgentService(Path(db_path).expanduser(), runtime)
 
+    sync_path = os.environ.get("OBSIDIAN_SYNC_VAULT")
+    git_sync = GitSync(Path(sync_path)) if sync_path else None
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         app.state.startup_error = None
@@ -53,9 +58,13 @@ def create_app(
             await service.start()
         except RuntimeFailure as exc:
             app.state.startup_error = exc.code
+        sync_task = asyncio.create_task(git_sync.run()) if git_sync else None
         try:
             yield
         finally:
+            if sync_task:
+                sync_task.cancel()
+                await asyncio.gather(sync_task, return_exceptions=True)
             if app.state.startup_error is None:
                 await service.close()
 
@@ -102,6 +111,10 @@ def create_app(
                 else None
             ),
         }
+
+    @app.get("/v1/knowledge/git", dependencies=auth)
+    async def git_status():
+        return git_sync.last_result if git_sync else {"status": "disabled"}
 
     @app.post("/v1/agent/turns", status_code=202, dependencies=auth)
     async def submit_turn(body: TurnInput):

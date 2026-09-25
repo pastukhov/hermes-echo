@@ -17,9 +17,9 @@ static int write_socket(void *context, const char *data, size_t length) {
 static voice_transport_result_t begin(voice_transport_t *t) {
   if (!voice_wireguard_ready()) return VOICE_TRANSPORT_FATAL;
   http_voice_client_t *c = (http_voice_client_t *)t->ctx;
-  if (c->config.protocol_version == 2) c->turn_id[0] = '\0';
+  c->turn_id[0] = '\0';
   const char *url = c->config.url;
-  if (c->config.protocol_version == 2) {
+  {
     if (!voice_turn_build_upload_url(c->config.url, c->upload_url,
                                      sizeof(c->upload_url)))
       return VOICE_TRANSPORT_FATAL;
@@ -35,9 +35,7 @@ static voice_transport_result_t begin(voice_transport_t *t) {
   esp_http_client_set_header(c->client, "X-Sample-Rate", "16000");
   esp_http_client_set_header(c->client, "X-Channels", "1");
   esp_http_client_set_header(c->client, "X-Sample-Format", "s16le");
-  esp_http_client_set_header(c->client, "X-Protocol-Version",
-                             c->config.protocol_version == 2 ? "2" : "1");
-  if (c->config.protocol_version == 2) {
+  {
     if (!c->config.request_id ||
         strlen(c->config.request_id) != VOICE_TURN_REQUEST_ID_CAPACITY - 1 ||
         esp_http_client_set_header(c->client, "X-Request-Id",
@@ -68,7 +66,7 @@ static voice_transport_result_t finish_body(voice_transport_t *t) {
   if (n < 0) return VOICE_TRANSPORT_FATAL;
   c->status_code = esp_http_client_get_status_code(c->client);
   ESP_LOGI(TAG, "voice gateway HTTP %d", c->status_code);
-  if (c->config.protocol_version == 2) {
+  {
     if (c->status_code != 202) return VOICE_TRANSPORT_FATAL;
     char body[256];
     size_t used = 0;
@@ -85,17 +83,6 @@ static voice_transport_result_t finish_body(voice_transport_t *t) {
       return VOICE_TRANSPORT_FATAL;
     return VOICE_TRANSPORT_OK;
   }
-  c->response_ready = 1;
-  return VOICE_TRANSPORT_OK;
-}
-
-static voice_transport_result_t poll_response(voice_transport_t *t, uint8_t *data, size_t cap, size_t *received) {
-  http_voice_client_t *c = (http_voice_client_t *)t->ctx;
-  if (!c->response_ready) return VOICE_TRANSPORT_FATAL;
-  int n = esp_http_client_read(c->client, (char *)data, (int)cap);
-  if (n < 0) return VOICE_TRANSPORT_FATAL;
-  *received = (size_t)n;
-  return n == 0 ? VOICE_TRANSPORT_EOF : VOICE_TRANSPORT_OK;
 }
 
 static void abort_body(voice_transport_t *t) {
@@ -103,15 +90,14 @@ static void abort_body(voice_transport_t *t) {
   if (c->client) { esp_http_client_close(c->client); esp_http_client_cleanup(c->client); c->client = NULL; }
 }
 
-static const voice_transport_ops_t OPS = {begin, write_body, finish_body, poll_response, abort_body};
+static const voice_transport_ops_t OPS = {begin, write_body, finish_body, NULL, abort_body};
 #else
 static const voice_transport_ops_t OPS = {0};
 #endif
 
 int http_voice_client_init(http_voice_client_t *c, const http_voice_config_t *config) {
   if (!c || !config || !config->url) return -1;
-  if (config->protocol_version != 1 && config->protocol_version != 2) return -1;
-  if (config->protocol_version == 2 && (!config->token || !config->token[0])) return -1;
+  if (!config->token || !config->token[0]) return -1;
   memset(c, 0, sizeof(*c)); c->config = *config; c->transport.ops = &OPS; c->transport.ctx = c;
 #ifndef ESP_PLATFORM
   return -2;

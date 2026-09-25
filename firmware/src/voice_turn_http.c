@@ -41,8 +41,7 @@ static esp_http_client_handle_t open_request(voice_turn_http_t *http,
   if (!client) return NULL;
   esp_http_client_set_method(client, strcmp(method, "POST") == 0
                                         ? HTTP_METHOD_POST : HTTP_METHOD_GET);
-  if (esp_http_client_set_header(client, "X-Device-Id", http->device_id) != ESP_OK ||
-      esp_http_client_set_header(client, "X-Protocol-Version", "2") != ESP_OK) {
+  if (esp_http_client_set_header(client, "X-Device-Id", http->device_id) != ESP_OK) {
     esp_http_client_cleanup(client);
     return NULL;
   }

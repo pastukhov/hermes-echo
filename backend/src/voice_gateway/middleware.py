@@ -99,6 +99,11 @@ PUBLIC_PATHS: frozenset[str] = frozenset({
     "/openapi.json",
 })
 
+#: Device routes authenticate their ``X-Device-Id`` plus bearer token in
+#: ``jobs.api``. The global API-key check must not require that same bearer
+#: token to equal a second, unrelated secret.
+DEVICE_API_PREFIX = "/api/v2/voice/"
+
 #: Route key used when no FastAPI route matches the request path (404s).
 UNMATCHED_ROUTE = "unknown"
 
@@ -167,7 +172,8 @@ class AuthMiddleware:
         token = correlation_id_var.set(correlation_id)
         try:
             path = scope["path"]
-            if self._expected is not None and path not in PUBLIC_PATHS:
+            if (self._expected is not None and path not in PUBLIC_PATHS
+                    and not path.startswith(DEVICE_API_PREFIX)):
                 provided = _extract_token(headers)
                 if provided is None or not hmac.compare_digest(
                         _token_digest(provided), self._expected):

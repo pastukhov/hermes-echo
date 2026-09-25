@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI
 
-from backend.src.voice_gateway.app import FALLBACK_REPLY, create_app
+from backend.src.voice_gateway.app import create_app
 from backend.src.voice_gateway.hermes.fake import FakeHermes
 from backend.src.voice_gateway.models import Transcript
 from backend.src.voice_gateway.stt.fake import FakeSTT

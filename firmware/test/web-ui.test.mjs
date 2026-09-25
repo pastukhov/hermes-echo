@@ -26,7 +26,7 @@ async function openSetupPage(config = {}, scan = {ok:true, networks:[{ssid:'Atit
     fetch: async(path,options)=>{
       requested.push({path,options});
       return {ok:true,json:async()=>path==='/config'
-        ? {wifi_ssid:'',gateway_url:'',protocol_version:1,device_token_set:false,ip:'0.0.0.0',ap_ip:'192.168.4.1',...config}
+        ? {wifi_ssid:'',gateway_url:'',device_token_set:true,ip:'0.0.0.0',ap_ip:'192.168.4.1',...config}
         : scan};
     },
     setInterval:callback=>intervals.push(callback),setTimeout:()=>{},
@@ -70,19 +70,19 @@ test('setup saves without an editable device ID',async()=>{
   assert.equal(post.options.body.has('device_id'),false);
 });
 
-test('setup defaults to protocol v1 and explains the endpoint format', async () => {
+test('setup exposes one protocol and a base URL without a version selector', async () => {
   const { elements } = await openSetupPage();
-  assert.equal(elements.protocol.value, '1');
-  assert.match(elements['gateway-help'].textContent, /api\/v1/i);
+  assert.equal(elements.protocol, undefined);
+  assert.doesNotMatch(html, /Voice protocol|synchronous|asynchronous/);
+  assert.match(elements['gateway-help'].textContent, /Base URL/i);
 });
 
-test('setup submits v2 only with a device token and an origin URL', async () => {
-  const { elements, requested, context } = await openSetupPage();
+test('setup submits only with a device token and an origin URL', async () => {
+  const { elements, requested, context } = await openSetupPage({device_token_set:false});
   context.editWifi('Atitlan');
   elements['wifi-open'].checked = true;
   context.applyWifi();
   elements.url.value = 'http://gateway.local:8080';
-  elements.protocol.value = '2';
   await context.saveCfg();
   assert.match(elements.info.textContent, /token/i);
   assert.equal(requested.some(request => request.options?.method === 'POST'), false);
@@ -91,7 +91,7 @@ test('setup submits v2 only with a device token and an origin URL', async () => 
   await context.saveCfg();
   const post = requested.find(request => request.options?.method === 'POST');
   assert.ok(post);
-  assert.equal(post.options.body.get('protocol_version'), '2');
+  assert.equal(post.options.body.has('protocol_version'), false);
 
   elements.url.value = 'http://gateway.local:8080/api/v1/voice/turn';
   await context.saveCfg();
@@ -104,7 +104,7 @@ test('sleep timeout loads a saved value and is submitted in seconds', async () =
   context.editWifi('test');
   elements['wifi-open'].checked = true;
   context.applyWifi();
-  elements.url.value = 'http://gateway.local/api/v1/voice/turn';
+  elements.url.value = 'http://gateway.local';
   elements['sleep-seconds'].value = '45';
   await context.saveCfg();
   assert.equal(requested.find(r => r.options?.method === 'POST').options.body.get('sleep_timeout_seconds'), '45');
@@ -115,7 +115,7 @@ test('sleep timeout defaults to 30 and rejects invalid values without posting', 
   context.editWifi('test');
   elements['wifi-open'].checked = true;
   context.applyWifi();
-  elements.url.value = 'http://gateway.local/api/v1/voice/turn';
+  elements.url.value = 'http://gateway.local';
   for (const value of ['', '0', '4', '3601', '30s', '1.5', '-30']) {
     elements['sleep-seconds'].value = value;
     await context.saveCfg();

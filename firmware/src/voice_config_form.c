@@ -48,12 +48,7 @@ bool voice_config_parse_form(char *body, voice_settings_t *next) {
       if (!decode_form_component(cursor, (size_t)(equals - cursor), key, sizeof(key)) ||
           !decode_form_component(equals + 1, (size_t)(pair_end - equals - 1), value, sizeof(value))) return false;
       char *dst = NULL; size_t cap = 0;
-      if (strcmp(key, "protocol_version") == 0) {
-        if (strcmp(value, "1") == 0) next->protocol_version = 1;
-        else if (strcmp(value, "2") == 0) next->protocol_version = 2;
-        else return false;
-      }
-      else if (strcmp(key, "sleep_timeout_seconds") == 0) {
+      if (strcmp(key, "sleep_timeout_seconds") == 0) {
         if (!voice_settings_parse_sleep_timeout(value, &next->sleep_timeout_seconds)) return false;
       }
       else if (strncmp(key, "wifi", 4) == 0) {

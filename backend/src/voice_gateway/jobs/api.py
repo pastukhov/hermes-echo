@@ -46,8 +46,6 @@ def install_voice_job_routes(
     @app.post("/api/v2/voice/turns", status_code=202)
     async def upload_turn(request: Request):
         device_id = await authenticate(request)
-        if request.headers.get("X-Protocol-Version") != "2":
-            raise HTTPException(status_code=400, detail={"error": "protocol_version_required"})
         raw_request_id = request.headers.get("X-Request-Id", "")
         try:
             request_id = str(uuid.UUID(raw_request_id))

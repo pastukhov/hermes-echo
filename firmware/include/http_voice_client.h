@@ -10,7 +10,6 @@ typedef struct {
   const char *device_id;
   const char *token;
   int timeout_ms;
-  int protocol_version;
   const char *request_id;
 } http_voice_config_t;
 
@@ -21,7 +20,6 @@ typedef struct {
   char turn_id[37];
   void *client;
   int status_code;
-  int response_ready;
 } http_voice_client_t;
 
 int http_voice_client_init(http_voice_client_t *c, const http_voice_config_t *config);

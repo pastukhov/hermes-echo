@@ -1,58 +1,10 @@
-# HTTP-протокол StickS3 ↔ Voice Gateway
+# Протокол диктофона: асинхронный голосовой запрос
 
-Firmware по умолчанию использует `X-Protocol-Version: 1`; v2 включается в setup page. Транспорт сейчас — HTTP. Оба endpoint’а должны быть доступны только в доверенной сети.
-
-## ESP → backend: voice turn
-
-```http
-POST /api/v1/voice/turn HTTP/1.1
-Host: gateway:8080
-Transfer-Encoding: chunked
-Content-Type: audio/L16
-X-Sample-Rate: 16000
-X-Channels: 1
-X-Sample-Format: s16le
-X-Device-Id: a1b2c3d4e5f6
-X-Protocol-Version: 1
-Authorization: Bearer <device-token>
-```
-
-В текущей реализации v1 gateway не проверяет device bearer token. Firmware может отправить заголовок `Authorization`, но это не включает серверную авторизацию v1. Поэтому v1 допустим только в доверенной LAN. Для v2 gateway проверяет bearer token, сопоставленный с `X-Device-Id`. MAC/device ID — идентификатор, не секрет.
-
-Переменная `VOICE_API_KEY` из шаблона `.env.example` не добавляет авторизацию для `/api/v1/voice/turn`. Не полагайтесь на неё для защиты v1 endpoint.
-
-Body — raw PCM S16LE, 16 000 Hz, 1 channel, little-endian signed 16-bit samples. ESP открывает POST при начале записи и передаёт chunks с минимальной задержкой; отпускание кнопки означает EOF/завершение chunked request. Полный audio body не должен собираться в RAM на ESP или backend.
-
-Обязательные headers:
-
-| Header | Значение |
-|---|---|
-| `Content-Type` | `audio/L16` |
-| `X-Sample-Rate` | `16000` |
-| `X-Channels` | `1` |
-| `X-Sample-Format` | `s16le` |
-| `X-Device-Id` | стабильный device ID StickS3: полный Wi-Fi MAC в hex, например `a1b2c3d4e5f6` |
-| `X-Protocol-Version` | `1` |
-| `Authorization` | Firmware может отправить заголовок, но текущий v1 gateway его не проверяет |
-
-## Ответ устройства
-
-```http
-HTTP/1.1 200 OK
-Content-Type: audio/wav
-X-Turn-Id: 550e8400-e29b-41d4-a716-446655440000
-```
-
-При настроенном TTS ответ содержит WAV PCM signed 16-bit mono; частота дискретизации берётся из WAV header. Firmware проверяет HTTP status, `Content-Type` и WAV metadata, затем передаёт аудио в playback без хранения полной записи в RAM. Если TTS не сконфигурирован, v1 может вернуть успешный ответ без аудиоданных — для голосового ответа TTS обязателен.
-
-## Протокол v2: асинхронный голосовой запрос
-
-v2 добавляет долговечный job API для ответов, которые могут длиться дольше одного HTTP-запроса. V1 остаётся доступной без изменений.
+Используется один долговечный job API. Путь `/api/v2/voice/` сохранён для совместимости клиентов; выбирать версию в настройках или отправлять `X-Protocol-Version` не требуется. Синхронный `/api/v1/voice/turn` удалён.
 
 ```http
 POST /api/v2/voice/turns HTTP/1.1
 Content-Type: audio/L16
-X-Protocol-Version: 2
 X-Request-Id: 9b69da5b-bd5d-44a3-9391-15e8dac36733
 X-Device-Id: a1b2c3d4e5f6
 X-Sample-Rate: 16000
@@ -90,22 +42,18 @@ JSON поля: `error` — машинный код; `turn_id` — UUID turn, е�
 
 ## Ошибки и рекомендуемые статусы
 
-| Код | HTTP | Значение |
-|---|---:|---|
 | Код | HTTP | Где возникает |
 |---|---:|---|
-| `unauthorized` | 401 | v2: token не соответствует `X-Device-Id` |
-| `protocol_version_required` | 400 | v2 upload без `X-Protocol-Version: 2` |
-| `invalid_request_id` | 400 | v2: request ID не является UUID |
-| `audio_too_large` | 413 | v2: upload превысил лимит 3 840 000 байт |
+| `unauthorized` | 401 | token не соответствует `X-Device-Id` |
+| `invalid_request_id` | 400 | request ID не является UUID |
+| `audio_too_large` | 413 | upload превысил лимит 3 840 000 байт |
 | `audio_invalid` | 400 | пустой/нечётный по размеру PCM upload |
 | `idempotency_conflict` | 409 | повторный request ID с другим audio body |
 | `upload_in_progress` | 409 | повторный upload этого request ID ещё идёт |
-| `agent_busy` | 429 | очередь v2 переполнена |
+| `agent_busy` | 429 | очередь запросов переполнена |
 | `audio_not_ready` | 409 | WAV запрошен до завершения обработки |
-| `stt_failed`, `agent_unavailable`, `tts_failed` | terminal status | обработка v2 не завершилась; код находится в `error` status payload |
+| `stt_failed`, `agent_unavailable`, `tts_failed` | terminal status | обработка запроса не завершилась; код находится в `error` status payload |
 
-HTTP status и JSON shape для v1 ошибок зависят от этапа обработки; устройства не следует привязывать к произвольному диагностическому тексту.
 
 ## Служебные endpoints
 

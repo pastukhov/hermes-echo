@@ -17,16 +17,16 @@ def test_request_latency_histogram_defined_with_labels() -> None:
     m = VoiceMetrics(CollectorRegistry())
     # Observe with the endpoint + status labels the card requires.
     m.request_latency.labels(
-        endpoint="/api/v1/voice/turn", status="success").observe(0.42)
+        endpoint="/api/v2/voice/turns", status="success").observe(0.42)
     m.request_latency.labels(
-        endpoint="/api/v1/voice/turn", status="stt_failed").observe(0.07)
+        endpoint="/api/v2/voice/turns", status="stt_failed").observe(0.07)
 
     text = _scrape_text(m)
-    assert 'request_latency_seconds_count{endpoint="/api/v1/voice/turn",' \
+    assert 'request_latency_seconds_count{endpoint="/api/v2/voice/turns",' \
            'status="success"} 1.0' in text
-    assert 'request_latency_seconds_bucket{endpoint="/api/v1/voice/turn",' \
+    assert 'request_latency_seconds_bucket{endpoint="/api/v2/voice/turns",' \
            'le="0.5",status="success"} 1.0' in text
-    assert 'request_latency_seconds_count{endpoint="/api/v1/voice/turn",' \
+    assert 'request_latency_seconds_count{endpoint="/api/v2/voice/turns",' \
            'status="stt_failed"} 1.0' in text
 
 
@@ -36,7 +36,7 @@ def test_request_latency_uses_request_buckets() -> None:
     from backend.src.voice_gateway import metrics as metrics_mod
 
     m = metrics_mod.VoiceMetrics(CollectorRegistry())
-    m.request_latency.labels(endpoint="/api/v1/voice/turn",
+    m.request_latency.labels(endpoint="/api/v2/voice/turns",
                              status="success").observe(0.3)
 
     text = _scrape_text(m)
@@ -44,7 +44,7 @@ def test_request_latency_uses_request_buckets() -> None:
     # 2.5 -> "2.5", 0.05 -> "0.05". Format the boundary the same way.
     for boundary in metrics_mod._REQUEST_BUCKETS:
         rendered = f"{float(boundary)}"
-        line = 'request_latency_seconds_bucket{endpoint="/api/v1/voice/turn",' \
+        line = 'request_latency_seconds_bucket{endpoint="/api/v2/voice/turns",' \
                f'le="{rendered}",status="success"}} '
         assert any(l.startswith(line) for l in text.splitlines()), \
             f"bucket {boundary} missing from scrape output"

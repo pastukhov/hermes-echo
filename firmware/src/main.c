@@ -93,7 +93,7 @@
 #define VOICE_WIFI_PASSWORD ""
 #endif
 #ifndef VOICE_GATEWAY_URL
-#define VOICE_GATEWAY_URL "http://192.168.1.10:8000/api/v1/voice/turn"
+#define VOICE_GATEWAY_URL "http://192.168.1.10:8000"
 #endif
 #ifndef VOICE_DEVICE_TOKEN
 #define VOICE_DEVICE_TOKEN NULL
@@ -145,8 +145,6 @@ typedef struct {
    */
   size_t playback_position;
   wav_parser_t wav;
-  bool response_eof;
-  bool response_valid;
 #ifdef ESP_PLATFORM
   StreamBufferHandle_t turn_audio_stream;
   StreamBufferHandle_t turn_upload_stream;
@@ -322,11 +320,6 @@ static bool begin_turn_request(void) {
 }
 #endif
 
-static size_t response_pcm_sink(void *ctx, const uint8_t *data, size_t len) {
-  app_t *a = (app_t *)ctx;
-  return ring_buffer_push(&a->playback_rb, data, len);
-}
-
 static void enter_state(state_t next, const char* error_what) {
   if (!state_machine_step(&app.sm, next)) {
     return; /* illegal transition: leave state, report if we can */
@@ -351,24 +344,24 @@ static void enter_state(state_t next, const char* error_what) {
  */
 static bool recording_start(void) {
 #ifdef ESP_PLATFORM
-  if (!voice_wireguard_ready()) return false;
-  if (voice_settings.protocol_version == 2 && app.turn_task_active) return false;
-  if (voice_settings.protocol_version == 2 &&
-      !begin_turn_request()) return false;
+  if (!voice_wireguard_ready() || !app.turn_http_ready) return false;
+  if (app.turn_task_active) return false;
+  if (!begin_turn_request()) return false;
 #endif
   ring_buffer_reset(&app.rb);
   ring_buffer_reset(&app.playback_rb);
 #ifdef ESP_PLATFORM
-  if (voice_settings.protocol_version == 2) {
+  {
     if (!start_turn_worker(true)) return false;
     hw_audio_capture_start();
     return true;
   }
-#endif
+#else
   http_session_init(&app.session);
   if (!http_session_open(&app.session)) return false;
   hw_audio_capture_start();
   return true;
+#endif
 }
 
 /*
@@ -376,6 +369,7 @@ static bool recording_start(void) {
  * connection still allows it; fall back to abort when a graceful close
  * cannot complete (network already dead).
  */
+#ifndef ESP_PLATFORM
 static void session_close_or_abort(void) {
   if (http_session_is_active(&app.session)) {
     if (!http_session_close(&app.session)) {
@@ -383,6 +377,8 @@ static void session_close_or_abort(void) {
     }
   }
 }
+
+#endif
 
 /*
  * Capture side of the audio path (M1-03). Pulls whatever PCM the
@@ -396,10 +392,7 @@ static void recording_capture(void) {
   size_t n;
   while ((n = hw_audio_capture_read(chunk, sizeof(chunk))) > 0) {
     ring_buffer_push(&app.rb, chunk, n);
-#ifdef ESP_PLATFORM
-    if (voice_settings.protocol_version != 2)
-      ring_buffer_push(&app.playback_rb, chunk, n);
-#else
+#ifndef ESP_PLATFORM
     ring_buffer_push(&app.playback_rb, chunk, n);
 #endif
   }
@@ -416,7 +409,7 @@ static void recording_drain(void) {
   while (!ring_buffer_overflow(&app.rb) && !ring_buffer_empty(&app.rb)) {
     size_t limit = sizeof(chunk);
 #ifdef ESP_PLATFORM
-    if (voice_settings.protocol_version == 2) {
+    {
       size_t available = xStreamBufferSpacesAvailable(app.turn_upload_stream);
       if (!available) return;
       if (limit > available) limit = available;
@@ -427,15 +420,15 @@ static void recording_drain(void) {
       break;
     }
 #ifdef ESP_PLATFORM
-    if (voice_settings.protocol_version == 2) {
+    {
       if (xStreamBufferSend(app.turn_upload_stream, chunk, n, 0) != n) {
         app.turn_upload_failed = true;
         return;
       }
-      continue;
     }
-#endif
+#else
     (void)http_session_write(&app.session, chunk, n);
+#endif
   }
 }
 
@@ -451,12 +444,10 @@ static void recording_drain(void) {
 static void on_ring_buffer_overflow(void) {
   hw_audio_capture_stop();
 #ifdef ESP_PLATFORM
-  if (voice_settings.protocol_version == 2) {
+  {
     app.turn_upload_failed = true;
     app.turn_upload_finished = true;
     app.turn_cancel_requested = true;
-  } else {
-    session_close_or_abort();
   }
 #else
   session_close_or_abort();
@@ -513,7 +504,7 @@ static void playback_release_resources(void) {
  */
 static void on_playback_error(const char* what) {
 #ifdef ESP_PLATFORM
-  if (voice_settings.protocol_version == 2) app.turn_cancel_requested = true;
+  app.turn_cancel_requested = true;
 #endif
   playback_release_resources();
   enter_state(STATE_ERROR, what);
@@ -541,6 +532,7 @@ static void playback_start(void) {
  * we instead popped the next chunk in its place, played back out of
  * order.
  */
+#ifndef ESP_PLATFORM
 static void playback_drain(void) {
   if (app.playback_pending_len > 0) {
     size_t written =
@@ -565,6 +557,8 @@ static void playback_drain(void) {
     app.playback_position += written;
   }
 }
+
+#endif
 
 #ifdef ESP_PLATFORM
 static bool turn_playback_drain(void) {
@@ -593,14 +587,14 @@ static bool turn_playback_drain(void) {
 
 /* True once every captured byte has been handed to the speaker AND the
  * hardware confirms it actually finished playing them (not just queued). */
+#ifndef ESP_PLATFORM
 static bool playback_finished(void) {
   return ring_buffer_empty(&app.playback_rb) && app.playback_pending_len == 0 &&
          hw_audio_playback_drained()
-#ifdef ESP_PLATFORM
-         && app.response_eof && app.response_valid
-#endif
       ;
 }
+
+#endif
 
 void app_init(void) {
   state_machine_init(&app.sm);
@@ -619,11 +613,13 @@ void app_init(void) {
   app.playback_position = 0;
   app.playback_conn_dropped = false;
   app.playback_bad_wav_header = false;
-  app.response_eof = false;
-  app.response_valid = false;
   http_session_init(&app.session);
 #ifdef ESP_PLATFORM
   (void)voice_settings_load(&voice_settings);
+  uint8_t sta_mac[6];
+  ESP_ERROR_CHECK(esp_read_mac(sta_mac, ESP_MAC_WIFI_STA));
+  voice_settings_set_device_id_from_mac(&voice_settings, sta_mac);
+  board_sticks3_display_set_device_id(voice_settings.device_id);
   ESP_LOGI("power", "Battery idle sleep timeout: %lu seconds",
            (unsigned long)voice_settings.sleep_timeout_seconds);
   app.turn_task_active = false;
@@ -636,7 +632,7 @@ void app_init(void) {
   app.turn_http_ready = false;
   app.turn_storage_failed = false;
   app.turn_pending_byte = false;
-  if (voice_settings.protocol_version == 2) {
+  {
     app.turn_audio_stream = xStreamBufferCreate(8192, 1);
     app.turn_upload_stream = xStreamBufferCreate(8192, 1);
     if (app.turn_audio_stream && app.turn_upload_stream &&
@@ -647,10 +643,6 @@ void app_init(void) {
           &app.turn_cancel_requested, &app.turn_audio_started);
     }
   }
-  uint8_t sta_mac[6];
-  ESP_ERROR_CHECK(esp_read_mac(sta_mac, ESP_MAC_WIFI_STA));
-  voice_settings_set_device_id_from_mac(&voice_settings, sta_mac);
-  board_sticks3_display_set_device_id(voice_settings.device_id);
   if (voice_wifi_first_profile(voice_settings.wifi) >= 0) {
     if (!board_sticks3_wifi_start(voice_settings.wifi)) {
       (void)board_sticks3_wifi_start_ap();
@@ -664,8 +656,7 @@ void app_init(void) {
       .url = voice_settings.gateway_url,
       .device_id = voice_settings.device_id,
       .token = voice_settings.device_token[0] ? voice_settings.device_token : NULL,
-      .timeout_ms = voice_settings.protocol_version == 2 ? 5000 : 15000,
-      .protocol_version = voice_settings.protocol_version,
+      .timeout_ms = 5000,
       .request_id = voice_settings.request_id,
   };
   if (http_voice_client_init(&voice_client, &cfg) == 0)
@@ -748,7 +739,7 @@ void app_tick(void) {
     case STATE_BOOT:
       if (++app.boot_ticks >= APP_BOOT_TICKS) {
 #ifdef ESP_PLATFORM
-        if (voice_settings.protocol_version == 2 && voice_settings.request_id[0]) {
+        if (voice_settings.request_id[0]) {
           if (start_turn_worker(false)) enter_state(STATE_PROCESSING, NULL);
           else enter_state(STATE_ERROR, "could not resume saved voice turn");
         } else {
@@ -788,8 +779,7 @@ void app_tick(void) {
         break;
       }
 #ifdef ESP_PLATFORM
-      if (voice_settings.protocol_version == 2 &&
-          app.turn_result == VOICE_TURN_FAILED && !app.turn_task_active) {
+      if (app.turn_result == VOICE_TURN_FAILED && !app.turn_task_active) {
         hw_audio_capture_stop();
         enter_state(STATE_ERROR, "voice upload failed");
         break;
@@ -808,17 +798,16 @@ void app_tick(void) {
          * gracefully.
          */
         hw_audio_capture_stop();
+#ifndef ESP_PLATFORM
         session_close_or_abort();
+#endif
 #ifdef ESP_PLATFORM
-        if (voice_settings.protocol_version == 2) {
+        {
           app.turn_upload_release_requested = true;
           if (!voice_settings.request_id[0] || !app.turn_task_active) {
             enter_state(STATE_ERROR, "could not resume voice turn");
             break;
           }
-        } else if (http_voice_client_status(&voice_client) != 200) {
-          enter_state(STATE_ERROR, "voice gateway returned non-200");
-          break;
         }
 #endif
         enter_state(STATE_PROCESSING, NULL);
@@ -834,7 +823,7 @@ void app_tick(void) {
        * backend" condition lands with the M2 network wiring.
        */
 #ifdef ESP_PLATFORM
-      if (voice_settings.protocol_version == 2) {
+      {
         if (app.turn_upload_release_requested && !app.turn_upload_finished) {
           recording_drain();
           if (ring_buffer_empty(&app.rb)) app.turn_upload_finished = true;
@@ -855,11 +844,6 @@ void app_tick(void) {
         }
         break;
       }
-      ring_buffer_reset(&app.playback_rb);
-      app.response_eof = false;
-      app.response_valid = false;
-      wav_parser_init(&app.wav, response_pcm_sink, &app);
-      hw_audio_playback_start(NULL, 0);
 #else
       playback_start();
 #endif
@@ -889,7 +873,7 @@ void app_tick(void) {
         break;
       }
 #ifdef ESP_PLATFORM
-      if (voice_settings.protocol_version == 2) {
+      {
         if (app.turn_result == VOICE_TURN_FAILED || app.turn_storage_failed) {
           on_playback_error("voice turn failed during audio");
           break;
@@ -901,13 +885,13 @@ void app_tick(void) {
           break;
         }
         if (!turn_playback_drain()) {
-          on_playback_error("speaker rejected v2 audio");
+          on_playback_error("speaker rejected voice audio");
           break;
         }
         if (app.turn_result == VOICE_TURN_READY &&
             xStreamBufferBytesAvailable(app.turn_audio_stream) == 0) {
           if (app.turn_pending_byte) {
-            on_playback_error("odd-length v2 audio");
+            on_playback_error("odd-length voice audio");
             break;
           }
           if (hw_audio_playback_drained()) {
@@ -918,27 +902,8 @@ void app_tick(void) {
         break;
       }
 #endif
-      /* Pull one bounded response chunk before draining the speaker queue. */
-#ifdef ESP_PLATFORM
-      if (!app.response_eof) {
-        uint8_t net[1024]; size_t received = 0;
-        size_t free_space = ring_buffer_capacity(&app.playback_rb) - ring_buffer_count(&app.playback_rb);
-        size_t poll_capacity = free_space < sizeof(net) ? free_space : sizeof(net);
-        voice_transport_result_t tr = poll_capacity == 0 ? VOICE_TRANSPORT_WOULD_BLOCK
-            : http_session_poll(&app.session, net, poll_capacity, &received);
-        if (tr == VOICE_TRANSPORT_FATAL) { on_playback_error("voice response transport failed"); break; }
-        if (received) {
-          wav_result_t wr = WAV_OK;
-          size_t consumed = wav_parser_feed(&app.wav, net, received, &wr);
-          if (wr == WAV_ERROR || consumed != received) { on_playback_error("WAV response backpressure/error"); break; }
-        }
-        if (tr == VOICE_TRANSPORT_EOF) {
-          app.response_eof = true;
-          app.response_valid = wav_parser_finish(&app.wav) == WAV_OK;
-          if (!app.response_valid) { on_playback_error("truncated WAV response"); break; }
-        }
-      }
-#endif
+#ifndef ESP_PLATFORM
+
       /* M1-04: drain the loopback/response buffer to the speaker; wait for the
        * hardware to confirm playback actually finished before IDLE.
        *
@@ -967,6 +932,7 @@ void app_tick(void) {
         enter_state(STATE_IDLE, NULL);
       }
       break;
+#endif
 
     case STATE_ERROR: {
       bool raw_pressed = hw_button_raw();
@@ -978,7 +944,7 @@ void app_tick(void) {
         app.error_ack_pressed = true;
       } else if (ev == BUTTON_EVENT_RELEASED && app.error_ack_pressed) {
 #ifdef ESP_PLATFORM
-        if (voice_settings.protocol_version != 2 || !app.turn_task_active)
+        if (!app.turn_task_active)
           enter_state(STATE_IDLE, NULL);
 #else
         enter_state(STATE_IDLE, NULL);

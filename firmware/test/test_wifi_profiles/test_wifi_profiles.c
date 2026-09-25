@@ -8,6 +8,7 @@ static voice_settings_t settings;
 static voice_wifi_selector_t selector;
 void setUp(void) {
   voice_settings_load(&settings);
+  strcpy(settings.device_token, "test-token");
   strcpy(settings.device_id, "test-device");
   strcpy(settings.gateway_url, "http://gateway.test");
   strcpy(settings.wifi[0].ssid, "Home");
@@ -118,7 +119,6 @@ static void test_factory_reset_clears_all_credentials_and_restores_defaults(void
   TEST_ASSERT_EQUAL(51820, settings.wireguard.port);
   TEST_ASSERT_EQUAL(25, settings.wireguard.keepalive);
   TEST_ASSERT_EQUAL(30, settings.sleep_timeout_seconds);
-  TEST_ASSERT_EQUAL(1, settings.protocol_version);
   TEST_ASSERT_EQUAL(-1, voice_wifi_first_profile(settings.wifi));
   TEST_ASSERT_FALSE(voice_settings_valid(&settings));
 }

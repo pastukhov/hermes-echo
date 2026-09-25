@@ -38,7 +38,7 @@ def test_duplicate_upload_is_idempotent_and_owner_is_enforced(tmp_path):
         ) as client:
             request_id = str(uuid.uuid4())
             headers = {
-                "X-Protocol-Version": "2",
+
                 "X-Request-Id": request_id,
                 "X-Device-Id": "mic-a",
                 "Authorization": "Bearer device-secret",
@@ -93,7 +93,7 @@ def test_v2_authentication_happens_before_request_body_is_consumed(tmp_path):
                 "/api/v2/voice/turns",
                 content=body(),
                 headers={
-                    "X-Protocol-Version": "2",
+
                     "X-Request-Id": str(uuid.uuid4()),
                     "X-Device-Id": "mic-a",
                     "Authorization": "Bearer wrong",
@@ -119,7 +119,7 @@ def test_v2_rejects_audio_over_limit(tmp_path):
                 "/api/v2/voice/turns",
                 content=b"\x00" * 10,
                 headers={
-                    "X-Protocol-Version": "2",
+
                     "X-Request-Id": str(uuid.uuid4()),
                     "X-Device-Id": "mic-a",
                     "Authorization": "Bearer secret",

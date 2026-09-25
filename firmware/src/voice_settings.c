@@ -20,7 +20,7 @@ static bool reset_pending;
 #define VOICE_WIFI_PASSWORD ""
 #endif
 #ifndef VOICE_GATEWAY_URL
-#define VOICE_GATEWAY_URL "http://192.168.1.10:8000/api/v1/voice/turn"
+#define VOICE_GATEWAY_URL "http://192.168.1.10:8000"
 #endif
 #ifndef VOICE_DEVICE_TOKEN
 #define VOICE_DEVICE_TOKEN ""
@@ -43,7 +43,6 @@ static void defaults(voice_settings_t *s) {
   s->wireguard.keepalive = 25;
   copy_field(s->wireguard.netmask, sizeof(s->wireguard.netmask), "255.255.255.0");
   copy_field(s->wireguard.ntp_server, sizeof(s->wireguard.ntp_server), "pool.ntp.org");
-  s->protocol_version = 1;
   s->sleep_timeout_seconds = VOICE_SLEEP_DEFAULT_SECONDS;
 }
 
@@ -69,15 +68,24 @@ bool voice_settings_parse_sleep_timeout(const char *value, uint32_t *seconds) {
   return true;
 }
 
+void voice_settings_migrate_gateway(voice_settings_t *s) {
+  if (!s) return;
+  const char *suffixes[] = {"/api/v1/voice/turn", "/api/v2/voice/turns"};
+  for (size_t i = 0; i < 2; ++i) {
+    size_t len = strlen(s->gateway_url), suffix = strlen(suffixes[i]);
+    if (len > suffix && strcmp(s->gateway_url + len - suffix, suffixes[i]) == 0)
+      s->gateway_url[len - suffix] = '\0';
+  }
+}
+
 bool voice_settings_valid(const voice_settings_t *s) {
-  if (!s || !voice_wireguard_valid(&s->wireguard) || !voice_wifi_profiles_valid(s->wifi) || !s->device_id[0] ||
-      (s->protocol_version != 1 && s->protocol_version != 2)) return false;
+  if (!s || !voice_wireguard_valid(&s->wireguard) || !voice_wifi_profiles_valid(s->wifi) || !s->device_id[0]) return false;
   const char *url = s->gateway_url;
   const char *host = NULL;
   if (strncmp(url, "http://", 7) == 0) host = url + 7;
   else if (strncmp(url, "https://", 8) == 0) host = url + 8;
   if (!host || !host[0]) return false;
-  if (s->protocol_version == 2) {
+  {
     if (!s->device_token[0]) return false;
     char upload_url[256];
     if (!voice_turn_build_upload_url(url, upload_url, sizeof(upload_url))) return false;
@@ -100,6 +108,7 @@ esp_err_t voice_settings_load(voice_settings_t *s) {
   if (!settings_mutex) settings_mutex = xSemaphoreCreateMutex();
   if (!settings_mutex) return ESP_ERR_NO_MEM;
   defaults(s);
+  voice_settings_migrate_gateway(s);
   esp_err_t flash_err = nvs_flash_init();
   if (flash_err == ESP_ERR_NVS_NO_FREE_PAGES ||
       flash_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -146,15 +155,12 @@ esp_err_t voice_settings_load(voice_settings_t *s) {
   s->wireguard.full_tunnel = full_tunnel != 0;
   (void)nvs_get_u16(h, "wg_port", &s->wireguard.port);
   (void)nvs_get_u16(h, "wg_keepalive", &s->wireguard.keepalive);
-  int32_t protocol_version = 1;
-  if (nvs_get_i32(h, "protocol_version", &protocol_version) == ESP_OK &&
-      (protocol_version == 1 || protocol_version == 2))
-    s->protocol_version = protocol_version;
   uint32_t sleep_seconds;
   if (nvs_get_u32(h, "sleep_seconds", &sleep_seconds) == ESP_OK &&
       sleep_seconds >= VOICE_SLEEP_MIN_SECONDS && sleep_seconds <= VOICE_SLEEP_MAX_SECONDS)
     s->sleep_timeout_seconds = sleep_seconds;
   nvs_close(h);
+  voice_settings_migrate_gateway(s);
   return ESP_OK;
 }
 
@@ -188,8 +194,11 @@ static esp_err_t save_unlocked(const voice_settings_t *s) {
     err = nvs_set_str(h, fields[i].key, fields[i].value);
     if (err != ESP_OK) break;
   }
-  if (err == ESP_OK && (s->protocol_version == 1 || s->protocol_version == 2))
-    err = nvs_set_i32(h, "protocol_version", s->protocol_version);
+  // Remove the obsolete selector while preserving the rest of the namespace.
+  if (err == ESP_OK) {
+    esp_err_t obsolete = nvs_erase_key(h, "protocol_version");
+    if (obsolete != ESP_OK && obsolete != ESP_ERR_NVS_NOT_FOUND) err = obsolete;
+  }
   if (err == ESP_OK) err = nvs_set_u32(h, "sleep_seconds", s->sleep_timeout_seconds);
   if (err == ESP_OK) err = nvs_set_u8(h, "wg_enabled", s->wireguard.enabled);
   if (err == ESP_OK) err = nvs_set_u8(h, "wg_full_tunnel", s->wireguard.full_tunnel);

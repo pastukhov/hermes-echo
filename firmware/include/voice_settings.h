@@ -2,6 +2,7 @@
 #define VOICE_SETTINGS_H
 
 #include "voice_wireguard.h"
+#include "voice_wifi_profiles.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -19,8 +20,7 @@ typedef int esp_err_t;
 
 typedef struct {
   voice_wireguard_settings_t wireguard;
-  char wifi_ssid[33];
-  char wifi_password[65];
+  voice_wifi_profile_t wifi[VOICE_WIFI_PROFILE_COUNT];
   char gateway_url[192];
   char device_id[64];
   char device_token[192];

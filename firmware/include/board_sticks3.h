@@ -50,7 +50,8 @@ i2c_master_bus_handle_t board_sticks3_i2c_bus(void);
 void board_sticks3_power_tick(bool busy, uint32_t now_ms, uint32_t timeout_ms);
 
 /* Credentials are intentionally supplied at build/runtime, never committed. */
-bool board_sticks3_wifi_start(const char *ssid, const char *password);
+#include "voice_wifi_profiles.h"
+bool board_sticks3_wifi_start(const voice_wifi_profile_t profiles[VOICE_WIFI_PROFILE_COUNT]);
 bool board_sticks3_wifi_start_ap(void);
 void board_sticks3_log_memory(void);
 void board_sticks3_display_set_device_id(const char *device_id);

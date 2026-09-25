@@ -156,7 +156,7 @@ static void test_boot_can_resume_a_saved_voice_turn(void) {
 
 static void test_v2_settings_require_device_token_and_base_url(void) {
   voice_settings_t settings = {0};
-  strcpy(settings.wifi_ssid, "Atitlan");
+  strcpy(settings.wifi[0].ssid, "Atitlan");
   strcpy(settings.gateway_url, "http://192.168.1.10:8080");
   strcpy(settings.device_id, "7ce8b1e4b780");
   settings.protocol_version = 2;

@@ -651,9 +651,8 @@ void app_init(void) {
   ESP_ERROR_CHECK(esp_read_mac(sta_mac, ESP_MAC_WIFI_STA));
   voice_settings_set_device_id_from_mac(&voice_settings, sta_mac);
   board_sticks3_display_set_device_id(voice_settings.device_id);
-  if (voice_settings.wifi_ssid[0]) {
-    if (!board_sticks3_wifi_start(voice_settings.wifi_ssid,
-                                  voice_settings.wifi_password)) {
+  if (voice_wifi_first_profile(voice_settings.wifi) >= 0) {
+    if (!board_sticks3_wifi_start(voice_settings.wifi)) {
       (void)board_sticks3_wifi_start_ap();
     }
   } else {

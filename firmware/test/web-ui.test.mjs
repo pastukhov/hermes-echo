@@ -13,7 +13,7 @@ assert.ok(script, 'setup page has a script');
 
 async function openSetupPage(config = {}) {
   const elements = Object.fromEntries(
-    [...html.matchAll(/id='(wg-[^']+)'/g)].map(m => m[1]).concat(['sleep-seconds', 'scan', 'ssid', 'pass', 'url', 'token', 'protocol', 'ip', 'status', 'info', 'gateway-help', 'token-label']).map(id => [id, { value: '', textContent: '' }]),
+    [...html.matchAll(/id='([^']+)'/g)].map(m => m[1]).concat(['sleep-seconds', 'scan', 'ssid', 'pass', 'url', 'token', 'protocol', 'ip', 'status', 'info', 'gateway-help', 'token-label']).map(id => [id, { value: '', textContent: '' }]),
   );
   const select = elements.scan;
   select.options = [];
@@ -51,6 +51,7 @@ test('selected network and edited fields survive periodic status updates', async
   const { elements, intervals } = await openSetupPage();
   elements.scan.value = 'Atitlan';
   elements.scan.onchange();
+  elements['wifi-open0'].checked = true;
   elements.url.value = 'http://gateway.local/api/v1/voice/turn';
   for (const refresh of intervals) await refresh();
   assert.equal(elements.ssid.value, 'Atitlan');
@@ -61,6 +62,7 @@ test('save explains missing required settings without posting secrets', async ()
   const { elements, requested, context } = await openSetupPage();
   elements.scan.value = 'Atitlan';
   elements.scan.onchange();
+  elements['wifi-open0'].checked = true;
   elements.pass.value = 'test-secret';
   await context.saveCfg();
   assert.match(elements.info.textContent, /Gateway endpoint/i);
@@ -71,6 +73,7 @@ test('setup page saves without an editable Device ID', async () => {
   const { elements, requested, context } = await openSetupPage();
   elements.scan.value = 'Atitlan';
   elements.scan.onchange();
+  elements['wifi-open0'].checked = true;
   elements.url.value = 'http://gateway.local/api/v1/voice/turn';
   await context.saveCfg();
   const post = requested.find(request => request.options?.method === 'POST');
@@ -88,6 +91,7 @@ test('setup submits v2 only with a device token and an origin URL', async () => 
   const { elements, requested, context } = await openSetupPage();
   elements.scan.value = 'Atitlan';
   elements.scan.onchange();
+  elements['wifi-open0'].checked = true;
   elements.url.value = 'http://gateway.local:8080';
   elements.protocol.value = '2';
   await context.saveCfg();
@@ -109,6 +113,7 @@ test('sleep timeout loads a saved value and is submitted in seconds', async () =
   const { elements, requested, context } = await openSetupPage({ sleep_timeout_seconds: 120 });
   assert.equal(elements['sleep-seconds'].value, '120');
   elements.ssid.value = 'test';
+  elements['wifi-open0'].checked = true;
   elements.url.value = 'http://gateway.local/api/v1/voice/turn';
   elements['sleep-seconds'].value = '45';
   await context.saveCfg();
@@ -118,6 +123,7 @@ test('sleep timeout defaults to 30 and rejects invalid values without posting', 
   const { elements, requested, context } = await openSetupPage();
   assert.equal(elements['sleep-seconds'].value, '30');
   elements.ssid.value = 'test';
+  elements['wifi-open0'].checked = true;
   elements.url.value = 'http://gateway.local/api/v1/voice/turn';
   for (const value of ['', '0', '4', '3601', '30s', '1.5', '-30']) {
     elements['sleep-seconds'].value = value;
@@ -143,6 +149,7 @@ test('WireGuard loads public settings without filling secret inputs', async () =
   for (const refresh of intervals) await refresh();
   assert.equal(elements['wg-endpoint'].value, 'edited.example.com');
   elements.ssid.value = 'test';
+  elements['wifi-open0'].checked = true;
   elements.url.value = 'http://10.7.0.1:8080';
   elements['wg-clear-psk'].checked = true;
   await context.saveCfg();
@@ -151,4 +158,52 @@ test('WireGuard loads public settings without filling secret inputs', async () =
   assert.equal(body.get('wg_endpoint'), 'edited.example.com');
   assert.equal(body.get('wg_private_key'), '');
   assert.equal(body.get('wg_clear_psk'), '1');
+});
+
+test('multiple networks load without passwords and save all five slots', async () => {
+  const { elements, context, requested } = await openSetupPage({
+    gateway_url: 'http://gateway.test', wifi_networks: [
+      {ssid: 'Home', password_set: true}, {ssid: 'Work', password_set: true},
+      {ssid: 'Cottage', password_set: true},
+    ],
+  });
+  assert.equal(elements.ssid.value, 'Home');
+  assert.equal(elements.ssid1.value, 'Work');
+  assert.equal(elements.ssid2.value, 'Cottage');
+  assert.equal(elements.pass1.value, '');
+  elements.ssid1.value = '';
+  await context.saveCfg();
+  const body = requested.find(r => r.options?.method === 'POST').options.body;
+  assert.equal(body.get('wifi1_ssid'), '');
+  assert.equal(body.get('wifi2_ssid'), 'Cottage');
+  assert.equal(body.get('wifi2_password'), '');
+  assert.equal(body.get('wifi4_ssid'), '');
+});
+
+test('changing a saved SSID requires a new password or explicit open network', async () => {
+  const {elements, context, requested} = await openSetupPage({
+    gateway_url: 'http://gateway.test', wifi_networks: [{ssid:'Home', password_set:true}],
+  });
+  elements.ssid.value = 'OtherHome';
+  await context.saveCfg();
+  assert.match(elements.info.textContent, /enter password/);
+  assert.equal(requested.some(r=>r.options?.method==='POST'), false);
+  elements['wifi-open0'].checked = true;
+  await context.saveCfg();
+  assert.equal(requested.find(r=>r.options?.method==='POST').options.body.get('wifi0_open'), '1');
+});
+
+test('scan selection fills chosen slot and duplicate SSIDs are rejected', async () => {
+  const {elements, context, requested} = await openSetupPage({gateway_url:'http://gateway.test'});
+  elements['wifi-slot'].value = '2';
+  elements.scan.value = 'Atitlan';
+  elements.scan.onchange();
+  assert.equal(elements.ssid2.value, 'Atitlan');
+  assert.equal(elements.ssid.value, '');
+  elements['wifi-open2'].checked = true;
+  elements.ssid.value = 'Atitlan';
+  elements['wifi-open0'].checked = true;
+  await context.saveCfg();
+  assert.match(elements.info.textContent, /Duplicate/);
+  assert.equal(requested.some(r=>r.options?.method==='POST'), false);
 });

@@ -33,6 +33,11 @@ static bool update_form_field(char *dst, size_t cap, const char *value) {
 bool voice_config_parse_form(char *body, voice_settings_t *next) {
   if (!body || !next) return false;
   bool clear_psk = false;
+  char old_ssids[VOICE_WIFI_PROFILE_COUNT][33];
+  bool password_given[VOICE_WIFI_PROFILE_COUNT] = {0};
+  bool open_network[VOICE_WIFI_PROFILE_COUNT] = {0};
+  for (int i = 0; i < VOICE_WIFI_PROFILE_COUNT; ++i)
+    memcpy(old_ssids[i], next->wifi[i].ssid, sizeof(old_ssids[i]));
   char *cursor = body;
   while (*cursor) {
     char *pair_end = strchr(cursor, '&');
@@ -51,8 +56,29 @@ bool voice_config_parse_form(char *body, voice_settings_t *next) {
       else if (strcmp(key, "sleep_timeout_seconds") == 0) {
         if (!voice_settings_parse_sleep_timeout(value, &next->sleep_timeout_seconds)) return false;
       }
-      else if (strcmp(key, "wifi_ssid") == 0) { dst = next->wifi_ssid; cap = sizeof(next->wifi_ssid); }
-      else if (strcmp(key, "wifi_password") == 0) { dst = next->wifi_password; cap = sizeof(next->wifi_password); }
+      else if (strncmp(key, "wifi", 4) == 0) {
+        int index;
+        const char *field;
+        if (strcmp(key, "wifi_ssid") == 0 || strcmp(key, "wifi_password") == 0) {
+          index = 0;
+          field = key + 5;
+        } else {
+          if (key[4] < '0' || key[4] >= '0' + VOICE_WIFI_PROFILE_COUNT || key[5] != '_') return false;
+          index = key[4] - '0';
+          field = key + 6;
+        }
+        if (strcmp(field, "ssid") == 0) {
+          if (!update_form_field(next->wifi[index].ssid, sizeof(next->wifi[index].ssid), value)) return false;
+        } else if (strcmp(field, "password") == 0) {
+          if (value[0]) {
+            if (!update_form_field(next->wifi[index].password, sizeof(next->wifi[index].password), value)) return false;
+            password_given[index] = true;
+          }
+        } else if (strcmp(field, "open") == 0) {
+          if (strcmp(value, "0") != 0 && strcmp(value, "1") != 0) return false;
+          open_network[index] = value[0] == '1';
+        } else return false;
+      }
       else if (strcmp(key, "gateway_url") == 0) { dst = next->gateway_url; cap = sizeof(next->gateway_url); }
       else if (strcmp(key, "device_token") == 0) { dst = next->device_token; cap = sizeof(next->device_token); }
       else if (strcmp(key, "wg_enabled") == 0 || strcmp(key, "wg_full_tunnel") == 0 ||
@@ -81,6 +107,10 @@ bool voice_config_parse_form(char *body, voice_settings_t *next) {
       if (dst && !(secret && !value[0]) && !update_form_field(dst, cap, value)) return false;
     }
     cursor = *pair_end ? pair_end + 1 : pair_end;
+  }
+  for (int i = 0; i < VOICE_WIFI_PROFILE_COUNT; ++i) {
+    if (!next->wifi[i].ssid[0] || open_network[i]) next->wifi[i].password[0] = '\0';
+    else if (strcmp(old_ssids[i], next->wifi[i].ssid) != 0 && !password_given[i]) return false;
   }
   if (clear_psk) next->wireguard.preshared_key[0] = '\0';
   return voice_settings_valid(next);

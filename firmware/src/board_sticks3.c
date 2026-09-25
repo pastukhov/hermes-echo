@@ -43,9 +43,11 @@ static spi_device_handle_t s_lcd;
 static bool s_lcd_ready;
 static bool s_wifi_initialized;
 static bool s_wifi_handlers_registered;
-static bool s_wifi_connected;
-static volatile bool s_sta_associated;
-static bool s_wifi_has_credentials;
+static _Atomic bool s_wifi_connected;
+static voice_wifi_profile_t s_wifi_profiles[VOICE_WIFI_PROFILE_COUNT];
+static voice_wifi_selector_t s_wifi_selector;
+static _Atomic bool s_manual_setup;
+static uint32_t s_wifi_started_ms;
 static voice_wifi_setup_t s_wifi_setup;
 static char s_setup_ssid[33];
 static TaskHandle_t s_wifi_manager_task;
@@ -66,9 +68,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
   if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
     ESP_LOGI(TAG, "Wi-Fi STA started");
   } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
-    s_sta_associated = true;
+    /* Connection is usable only after DHCP reports an IP. */
   } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-    s_sta_associated = false;
     s_wifi_connected = false;
     ESP_LOGW(TAG, "Wi-Fi disconnected");
   } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -80,11 +81,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
 static void wifi_manager(void *arg) {
   (void)arg;
-  uint32_t last_connect_attempt_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+
   for (;;) {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     voice_wifi_setup_set_connected(&s_wifi_setup, s_wifi_connected, now_ms);
-    if (voice_wifi_setup_should_stop_ap(&s_wifi_setup)) {
+    if (!s_manual_setup && voice_wifi_setup_should_stop_ap(&s_wifi_setup)) {
       esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
       if (err == ESP_OK) {
         voice_wifi_setup_set_ap_active(&s_wifi_setup, false);
@@ -92,7 +93,8 @@ static void wifi_manager(void *arg) {
       } else {
         ESP_LOGE(TAG, "Failed to stop setup AP: %s", esp_err_to_name(err));
       }
-    } else if (voice_wifi_setup_should_start_ap(&s_wifi_setup, now_ms)) {
+    } else if ((s_manual_setup && !s_wifi_setup.ap_active) ||
+               voice_wifi_setup_should_start_ap(&s_wifi_setup, now_ms)) {
       esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
       if (err == ESP_OK) {
         voice_wifi_setup_set_ap_active(&s_wifi_setup, true);
@@ -102,20 +104,36 @@ static void wifi_manager(void *arg) {
         ESP_LOGE(TAG, "Failed to start setup AP: %s", esp_err_to_name(err));
       }
     }
-    if (s_wifi_has_credentials && !s_wifi_connected && !s_sta_associated &&
-        (uint32_t)(now_ms - last_connect_attempt_ms) >= 5000U) {
-      esp_err_t err = esp_wifi_connect();
-      if (err != ESP_OK && err != ESP_ERR_WIFI_CONN)
-        ESP_LOGW(TAG, "Wi-Fi retry failed: %s", esp_err_to_name(err));
-      last_connect_attempt_ms = now_ms;
+    /* A scan owns the radio briefly; do not interrupt it with connect(). */
+    if (!voice_config_httpd_wifi_scanning()) {
+      int profile = voice_wifi_selector_tick(&s_wifi_selector, s_wifi_profiles,
+                                             s_wifi_connected, now_ms);
+      if (profile >= 0) {
+        (void)esp_wifi_disconnect();
+        wifi_config_t sta = {0};
+        memcpy(sta.sta.ssid, s_wifi_profiles[profile].ssid, strlen(s_wifi_profiles[profile].ssid));
+        memcpy(sta.sta.password, s_wifi_profiles[profile].password, strlen(s_wifi_profiles[profile].password));
+        sta.sta.threshold.authmode = s_wifi_profiles[profile].password[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+        esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta);
+        if (err == ESP_OK) err = esp_wifi_connect();
+        ESP_LOGI(TAG, "Wi-Fi profile %d: connection attempt (%s)", profile + 1, esp_err_to_name(err));
+      }
+    } else {
+      s_wifi_selector.started_ms = now_ms;
     }
     vTaskDelay(pdMS_TO_TICKS(500));
   }
 }
 
-static bool wifi_start_with_setup(const char *ssid, const char *password,
-                                  bool configured) {
+static bool wifi_start_with_setup(const voice_wifi_profile_t *profiles) {
+  bool configured = profiles && voice_wifi_first_profile(profiles) >= 0;
+  memset(s_wifi_profiles, 0, sizeof(s_wifi_profiles));
+  if (profiles) memcpy(s_wifi_profiles, profiles, sizeof(s_wifi_profiles));
+  voice_wifi_selector_init(&s_wifi_selector);
   if (!wifi_init_once(true, true)) return false;
+  /* The application owns credentials in NVS; switching profiles must not
+   * rewrite the Wi-Fi driver's flash storage on every attempt. */
+  if (esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK) return false;
   if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) return false;
   uint8_t mac[6];
   if (esp_wifi_get_mac(WIFI_IF_STA, mac) != ESP_OK ||
@@ -128,27 +146,17 @@ static bool wifi_start_with_setup(const char *ssid, const char *password,
   /* Configure both interfaces before start; switch to STA-only before
    * broadcasting when saved credentials exist. */
   if (esp_wifi_set_config(WIFI_IF_AP, &ap) != ESP_OK) return false;
-  if (configured) {
-    wifi_config_t sta = {0};
-    strncpy((char *)sta.sta.ssid, ssid, sizeof(sta.sta.ssid) - 1);
-    strncpy((char *)sta.sta.password, password, sizeof(sta.sta.password) - 1);
-    if (esp_wifi_set_config(WIFI_IF_STA, &sta) != ESP_OK ||
-        esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) return false;
-  }
-  voice_wifi_setup_init(&s_wifi_setup, configured,
-                        (uint32_t)(esp_timer_get_time() / 1000ULL));
+  if (configured && esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) return false;
+  s_wifi_started_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+  voice_wifi_setup_init(&s_wifi_setup, configured, s_wifi_started_ms);
   voice_wifi_setup_set_ap_active(&s_wifi_setup, !configured);
-  s_wifi_has_credentials = configured;
   s_wifi_connected = false;
-  s_sta_associated = false;
   esp_err_t err = esp_wifi_start();
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return false;
-  if (configured) {
-    err = esp_wifi_connect();
-    if (err != ESP_OK) ESP_LOGW(TAG, "Initial Wi-Fi connect: %s", esp_err_to_name(err));
-    if (!s_wifi_manager_task &&
+  if (!s_wifi_manager_task &&
         xTaskCreate(wifi_manager, "wifi_manager", 4096, NULL, 4,
                     &s_wifi_manager_task) != pdPASS) return false;
+  if (configured) {
     ESP_LOGI(TAG, "Wi-Fi STA started; setup AP will start after 60s if needed");
   } else {
     ESP_LOGI(TAG, "Setup AP started: SSID=%s, IP=192.168.4.1", s_setup_ssid);
@@ -291,7 +299,11 @@ void board_sticks3_power_tick(bool busy, uint32_t now_ms, uint32_t timeout_ms) {
   static power_policy_t policy;
   static uint32_t last_poll;
   static int last_source = -1;
-  bool key_pressed = hw_button_raw() || gpio_get_level(BOARD_KEY2_GPIO) == 0;
+  static voice_wifi_portal_t portal;
+  bool key2 = gpio_get_level(BOARD_KEY2_GPIO) == 0;
+  s_manual_setup = voice_wifi_portal_tick(&portal, key2, busy, now_ms);
+  busy |= s_manual_setup || voice_wifi_search_grace(s_wifi_connected, s_wifi_started_ms, now_ms);
+  bool key_pressed = hw_button_raw() || key2;
   if (busy || key_pressed) power_policy_reset(&policy, now_ms);
   if ((uint32_t)(now_ms - last_poll) < 1000) return;
   last_poll = now_ms;
@@ -517,13 +529,13 @@ void board_sticks3_log_memory(void) {
   ESP_LOGI(TAG, "PSRAM total: %u bytes", (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
 }
 
-bool board_sticks3_wifi_start(const char *ssid, const char *password) {
-  if (!ssid || !ssid[0] || !password) return false;
-  return wifi_start_with_setup(ssid, password, true);
+bool board_sticks3_wifi_start(const voice_wifi_profile_t profiles[VOICE_WIFI_PROFILE_COUNT]) {
+  if (!profiles || voice_wifi_first_profile(profiles) < 0) return false;
+  return wifi_start_with_setup(profiles);
 }
 
 bool board_sticks3_wifi_start_ap(void) {
-  return wifi_start_with_setup(NULL, NULL, false);
+  return wifi_start_with_setup(NULL);
 }
 
 uint32_t hw_clock_ms(void) {

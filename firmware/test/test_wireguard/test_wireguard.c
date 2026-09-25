@@ -9,7 +9,7 @@ static const char key[] = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
 
 void setUp(void) {
   voice_settings_load(&settings);
-  strcpy(settings.wifi_ssid, "test");
+  strcpy(settings.wifi[0].ssid, "test");
   strcpy(settings.device_id, "test-device");
   strcpy(settings.gateway_url, "http://10.7.0.1:8080");
   settings.wireguard.enabled = true;

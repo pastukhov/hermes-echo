@@ -31,8 +31,8 @@ static void copy_field(char *dst, size_t cap, const char *src) {
 
 static void defaults(voice_settings_t *s) {
   memset(s, 0, sizeof(*s));
-  copy_field(s->wifi_ssid, sizeof(s->wifi_ssid), VOICE_WIFI_SSID);
-  copy_field(s->wifi_password, sizeof(s->wifi_password), VOICE_WIFI_PASSWORD);
+  copy_field(s->wifi[0].ssid, sizeof(s->wifi[0].ssid), VOICE_WIFI_SSID);
+  copy_field(s->wifi[0].password, sizeof(s->wifi[0].password), VOICE_WIFI_PASSWORD);
   copy_field(s->gateway_url, sizeof(s->gateway_url), VOICE_GATEWAY_URL);
   copy_field(s->device_token, sizeof(s->device_token), VOICE_DEVICE_TOKEN);
   s->wireguard.port = 51820;
@@ -57,7 +57,7 @@ bool voice_settings_parse_sleep_timeout(const char *value, uint32_t *seconds) {
 }
 
 bool voice_settings_valid(const voice_settings_t *s) {
-  if (!s || !voice_wireguard_valid(&s->wireguard) || !s->wifi_ssid[0] || !s->device_id[0] ||
+  if (!s || !voice_wireguard_valid(&s->wireguard) || !voice_wifi_profiles_valid(s->wifi) || !s->device_id[0] ||
       (s->protocol_version != 1 && s->protocol_version != 2)) return false;
   const char *url = s->gateway_url;
   const char *host = NULL;
@@ -104,8 +104,16 @@ esp_err_t voice_settings_load(voice_settings_t *s) {
     {"wg_psk", s->wireguard.preshared_key, sizeof(s->wireguard.preshared_key)},
     {"wg_endpoint", s->wireguard.endpoint, sizeof(s->wireguard.endpoint)},
     {"wg_ntp_server", s->wireguard.ntp_server, sizeof(s->wireguard.ntp_server)},
-    {"wifi_ssid", s->wifi_ssid, sizeof(s->wifi_ssid)},
-    {"wifi_password", s->wifi_password, sizeof(s->wifi_password)},
+    {"wifi_ssid", s->wifi[0].ssid, sizeof(s->wifi[0].ssid)},
+    {"wifi_password", s->wifi[0].password, sizeof(s->wifi[0].password)},
+    {"wifi1_ssid", s->wifi[1].ssid, sizeof(s->wifi[1].ssid)},
+    {"wifi1_password", s->wifi[1].password, sizeof(s->wifi[1].password)},
+    {"wifi2_ssid", s->wifi[2].ssid, sizeof(s->wifi[2].ssid)},
+    {"wifi2_password", s->wifi[2].password, sizeof(s->wifi[2].password)},
+    {"wifi3_ssid", s->wifi[3].ssid, sizeof(s->wifi[3].ssid)},
+    {"wifi3_password", s->wifi[3].password, sizeof(s->wifi[3].password)},
+    {"wifi4_ssid", s->wifi[4].ssid, sizeof(s->wifi[4].ssid)},
+    {"wifi4_password", s->wifi[4].password, sizeof(s->wifi[4].password)},
     {"gateway_url", s->gateway_url, sizeof(s->gateway_url)},
     {"device_id", s->device_id, sizeof(s->device_id)},
     {"device_token", s->device_token, sizeof(s->device_token)},
@@ -148,7 +156,15 @@ esp_err_t voice_settings_save(const voice_settings_t *s) {
     {"wg_psk", s->wireguard.preshared_key},
     {"wg_endpoint", s->wireguard.endpoint},
     {"wg_ntp_server", s->wireguard.ntp_server},
-    {"wifi_ssid", s->wifi_ssid}, {"wifi_password", s->wifi_password},
+    {"wifi_ssid", s->wifi[0].ssid}, {"wifi_password", s->wifi[0].password},
+    {"wifi1_ssid", s->wifi[1].ssid},
+    {"wifi1_password", s->wifi[1].password},
+    {"wifi2_ssid", s->wifi[2].ssid},
+    {"wifi2_password", s->wifi[2].password},
+    {"wifi3_ssid", s->wifi[3].ssid},
+    {"wifi3_password", s->wifi[3].password},
+    {"wifi4_ssid", s->wifi[4].ssid},
+    {"wifi4_password", s->wifi[4].password},
     {"gateway_url", s->gateway_url}, {"device_id", s->device_id},
     {"device_token", s->device_token}, {"request_id", s->request_id},
     {"turn_id", s->turn_id},

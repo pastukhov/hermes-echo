@@ -410,13 +410,16 @@ bool voice_config_httpd_wifi_scanning(void) { return s_scan_running; }
 static void wifi_scan_task(void *arg) {
   (void)arg;
   vTaskDelay(pdMS_TO_TICKS(500));
-  esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-  esp_err_t dns_err = voice_captive_dns_start(ap);
-  if (dns_err != ESP_OK)
-    ESP_LOGE(TAG, "captive DNS start failed: %s", esp_err_to_name(dns_err));
   wifi_mode_t mode = WIFI_MODE_NULL;
   esp_err_t err = esp_wifi_get_mode(&mode);
-  if (err == ESP_OK && mode != WIFI_MODE_APSTA) err = ESP_ERR_INVALID_STATE;
+  if (err == ESP_OK && mode != WIFI_MODE_APSTA && mode != WIFI_MODE_STA)
+    err = ESP_ERR_INVALID_STATE;
+  if (err == ESP_OK && mode == WIFI_MODE_APSTA) {
+    esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    esp_err_t dns_err = voice_captive_dns_start(ap);
+    if (dns_err != ESP_OK)
+      ESP_LOGE(TAG, "captive DNS start failed: %s", esp_err_to_name(dns_err));
+  }
   esp_event_handler_instance_t handler = NULL;
   if (err == ESP_OK) err = esp_event_handler_instance_register(
       WIFI_EVENT, WIFI_EVENT_SCAN_DONE, scan_done, xTaskGetCurrentTaskHandle(), &handler);

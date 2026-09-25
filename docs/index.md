@@ -13,7 +13,7 @@
 - [Подключение Wi-Fi, gateway и прошивка StickS3](flash-sticks3.md)
 - [Сохранённые Wi-Fi сети и подключение по QR](wifi-profiles-sticks3.md)
 - [WireGuard и режим настройки](wireguard-sticks3.md)
-- [Голосовые идеи, LLM Wiki и Git-синхронизация Obsidian](voice-knowledge.md)
+- [LLM Wiki, Ramble your idea, then build и Git-синхронизация](voice-knowledge.md)
 - [Защита устройства и действия при потере](device-security.md)
 - [Формат HTTP-запросов; текущий протокол устройства — v2](protocol.md)
 

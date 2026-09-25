@@ -11,9 +11,9 @@ const html = [...htmlSource[1].matchAll(/"(?:\\.|[^"\\])*"/g)]
 const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
 assert.ok(script, 'setup page has a script');
 
-async function openSetupPage() {
+async function openSetupPage(config = {}) {
   const elements = Object.fromEntries(
-    ['scan', 'ssid', 'pass', 'url', 'token', 'protocol', 'ip', 'status', 'info', 'gateway-help', 'token-label'].map(id => [id, { value: '', textContent: '' }]),
+    [...html.matchAll(/id='(wg-[^']+)'/g)].map(m => m[1]).concat(['sleep-seconds', 'scan', 'ssid', 'pass', 'url', 'token', 'protocol', 'ip', 'status', 'info', 'gateway-help', 'token-label']).map(id => [id, { value: '', textContent: '' }]),
   );
   const select = elements.scan;
   select.options = [];
@@ -29,7 +29,7 @@ async function openSetupPage() {
     fetch: async (path, options) => {
       requested.push({ path, options });
       return { json: async () => path === '/config'
-        ? { wifi_ssid: '', gateway_url: '', device_id: '', protocol_version: 1, device_token_set: false, ip: '0.0.0.0', ap_ip: '192.168.4.1' }
+        ? { wifi_ssid: '', gateway_url: '', device_id: '', protocol_version: 1, device_token_set: false, ip: '0.0.0.0', ap_ip: '192.168.4.1', ...config }
         : { ok: true, scanning: false, networks: [{ ssid: 'Atitlan', rssi: -52 }] } };
     },
     setInterval: callback => { intervals.push(callback); },
@@ -103,4 +103,52 @@ test('setup submits v2 only with a device token and an origin URL', async () => 
   elements.url.value = 'http://gateway.local:8080/api/v1/voice/turn';
   await context.saveCfg();
   assert.match(elements.info.textContent, /base url/i);
+});
+
+test('sleep timeout loads a saved value and is submitted in seconds', async () => {
+  const { elements, requested, context } = await openSetupPage({ sleep_timeout_seconds: 120 });
+  assert.equal(elements['sleep-seconds'].value, '120');
+  elements.ssid.value = 'test';
+  elements.url.value = 'http://gateway.local/api/v1/voice/turn';
+  elements['sleep-seconds'].value = '45';
+  await context.saveCfg();
+  assert.equal(requested.find(r => r.options?.method === 'POST').options.body.get('sleep_timeout_seconds'), '45');
+});
+test('sleep timeout defaults to 30 and rejects invalid values without posting', async () => {
+  const { elements, requested, context } = await openSetupPage();
+  assert.equal(elements['sleep-seconds'].value, '30');
+  elements.ssid.value = 'test';
+  elements.url.value = 'http://gateway.local/api/v1/voice/turn';
+  for (const value of ['', '0', '4', '3601', '30s', '1.5', '-30']) {
+    elements['sleep-seconds'].value = value;
+    await context.saveCfg();
+    assert.match(elements.info.textContent, /Sleep timeout/);
+  }
+  assert.equal(requested.some(r => r.options?.method === 'POST'), false);
+});
+
+test('WireGuard loads public settings without filling secret inputs', async () => {
+  const { elements, context, requested, intervals } = await openSetupPage({
+    wg_enabled: true, wg_address: '10.7.0.2', wg_endpoint: 'vpn.example.com',
+    wg_port: 51821, wg_keepalive: 30, wg_private_key_set: true,
+    wg_preshared_key_set: true, wg_status: 'connected', wg_full_tunnel: true,
+  });
+  assert.equal(elements['wg-enabled'].checked, true);
+  assert.equal(elements['wg-full_tunnel'].checked, true);
+  assert.equal(elements['wg-port'].value, '51821');
+  assert.equal(elements['wg-private_key'].value, '');
+  assert.equal(elements['wg-preshared_key'].value, '');
+  assert.match(elements['wg-status'].textContent, /connected/);
+  elements['wg-endpoint'].value = 'edited.example.com';
+  for (const refresh of intervals) await refresh();
+  assert.equal(elements['wg-endpoint'].value, 'edited.example.com');
+  elements.ssid.value = 'test';
+  elements.url.value = 'http://10.7.0.1:8080';
+  elements['wg-clear-psk'].checked = true;
+  await context.saveCfg();
+  const body = requested.find(r => r.options?.method === 'POST').options.body;
+  assert.equal(body.get('wg_enabled'), '1');
+  assert.equal(body.get('wg_endpoint'), 'edited.example.com');
+  assert.equal(body.get('wg_private_key'), '');
+  assert.equal(body.get('wg_clear_psk'), '1');
 });

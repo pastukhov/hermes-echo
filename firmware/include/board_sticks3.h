@@ -43,6 +43,12 @@ ES8311 audio codec pins specified task
 #define BOARD_LCD_RST_GPIO 21
 #define BOARD_LCD_BL_GPIO 38
 
+#ifdef ESP_PLATFORM
+#include "driver/i2c_master.h"
+i2c_master_bus_handle_t board_sticks3_i2c_bus(void);
+#endif
+void board_sticks3_power_tick(bool busy, uint32_t now_ms, uint32_t timeout_ms);
+
 /* Credentials are intentionally supplied at build/runtime, never committed. */
 bool board_sticks3_wifi_start(const char *ssid, const char *password);
 bool board_sticks3_wifi_start_ap(void);

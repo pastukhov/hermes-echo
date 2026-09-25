@@ -43,15 +43,9 @@ esp_err_t audio_capture_init(const audio_capture_config_t *config) {
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port = I2C_NUM_0,
-        .sda_io_num = BOARD_I2C_SDA_GPIO,
-        .scl_io_num = BOARD_I2C_SCL_GPIO,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    esp_err_t err = i2c_new_master_bus(&bus_cfg, &s_bus);
+    /* Board owns the bus shared with the PMIC for the entire boot. */
+    s_bus = board_sticks3_i2c_bus();
+    esp_err_t err = s_bus ? ESP_OK : ESP_ERR_INVALID_STATE;
     if (err != ESP_OK) goto fail;
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BOARD_I2S_PORT, I2S_ROLE_MASTER);
@@ -146,7 +140,7 @@ esp_err_t audio_capture_deinit(void) {
     if (s_spk) { esp_codec_dev_close(s_spk); esp_codec_dev_delete(s_spk); s_spk = NULL; }
     if (s_rx) { i2s_channel_disable(s_rx); i2s_del_channel(s_rx); s_rx = NULL; }
     if (s_tx) { i2s_channel_disable(s_tx); i2s_del_channel(s_tx); s_tx = NULL; }
-    if (s_bus) { i2c_del_master_bus(s_bus); s_bus = NULL; }
+    s_bus = NULL; /* Borrowed; PMIC still uses this bus. */
     return ESP_OK;
 }
 

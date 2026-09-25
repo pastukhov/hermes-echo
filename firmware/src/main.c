@@ -67,6 +67,7 @@
 
 #ifdef ESP_PLATFORM
 #include "esp_mac.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
@@ -350,6 +351,7 @@ static void enter_state(state_t next, const char* error_what) {
  */
 static bool recording_start(void) {
 #ifdef ESP_PLATFORM
+  if (!voice_wireguard_ready()) return false;
   if (voice_settings.protocol_version == 2 && app.turn_task_active) return false;
   if (voice_settings.protocol_version == 2 &&
       !begin_turn_request()) return false;
@@ -622,6 +624,8 @@ void app_init(void) {
   http_session_init(&app.session);
 #ifdef ESP_PLATFORM
   (void)voice_settings_load(&voice_settings);
+  ESP_LOGI("power", "Battery idle sleep timeout: %lu seconds",
+           (unsigned long)voice_settings.sleep_timeout_seconds);
   app.turn_task_active = false;
   app.turn_cancel_requested = false;
   app.turn_audio_started = false;
@@ -655,6 +659,7 @@ void app_init(void) {
   } else {
     (void)board_sticks3_wifi_start_ap();
   }
+  voice_wireguard_start(&voice_settings.wireguard);
   voice_config_httpd_start(&voice_settings);
   const http_voice_config_t cfg = {
       .url = voice_settings.gateway_url,
@@ -1002,6 +1007,9 @@ static void voice_main_loop(void) {
       phase = SCREEN_PROCESSING_SYNTHESIZING;
 #endif
     board_sticks3_display_update(app_state(), hw_clock_ms(), phase);
+    board_sticks3_power_tick(
+      (app_state() != STATE_IDLE && app_state() != STATE_ERROR) || app.turn_task_active,
+      hw_clock_ms(), voice_settings.sleep_timeout_seconds * 1000U);
     /* Keep the USB/Wi-Fi/I2S system tasks and watchdog serviced. */
     vTaskDelay(pdMS_TO_TICKS(10));
   }

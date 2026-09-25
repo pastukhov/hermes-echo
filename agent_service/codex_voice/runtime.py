@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from openai_codex import ApprovalMode, AsyncCodex, Sandbox
+from openai_codex.errors import InvalidRequestError
 
 from .config import RuntimeConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 _SAFE_FAILURES: dict[str, tuple[str, bool]] = {
@@ -158,14 +163,30 @@ class CodexRuntime:
 
     async def resume_thread(self, thread_id: str) -> str:
         client = self._require_client()
+        if thread_id in self._threads:
+            return thread_id
         try:
-            thread = await client.thread_resume(
-                thread_id,
-                model=self._model,
-                cwd=self.config.cwd,
-                sandbox=Sandbox.read_only,
-                approval_mode=ApprovalMode.deny_all,
-            )
+            try:
+                thread = await client.thread_resume(
+                    thread_id,
+                    model=self._model,
+                    cwd=self.config.cwd,
+                    sandbox=Sandbox.read_only,
+                    approval_mode=ApprovalMode.deny_all,
+                )
+            except InvalidRequestError as exc:
+                # Desktop Codex can own an idle thread's writer lock. Never
+                # remove that lock: fork its history and persist the new ID.
+                if exc.message != f"thread {thread_id} already has an active writer":
+                    raise
+                thread = await client.thread_fork(
+                    thread_id,
+                    model=self._model,
+                    cwd=self.config.cwd,
+                    sandbox=Sandbox.read_only,
+                    approval_mode=ApprovalMode.deny_all,
+                )
+                logger.warning("Voice conversation forked after writer ownership conflict")
         except Exception as exc:
             raise self._classify_exception(exc) from None
         resolved_id = str(thread.id)
@@ -175,7 +196,7 @@ class CodexRuntime:
     async def run(self, thread_id: str, prompt: str) -> str:
         thread = self._threads.get(thread_id)
         if thread is None:
-            await self.resume_thread(thread_id)
+            thread_id = await self.resume_thread(thread_id)
             thread = self._threads[thread_id]
 
         try:

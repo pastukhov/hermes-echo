@@ -256,3 +256,29 @@ def test_reset_is_rejected_while_active_then_starts_a_new_generation(
         await service.close()
 
     asyncio.run(scenario())
+
+
+def test_forked_conversation_id_is_saved_and_used_after_restart(service_factory):
+    class ForkingRuntime(FakeRuntime):
+        async def resume_thread(self, thread_id):
+            return "forked-thread" if thread_id == "desktop-owned" else thread_id
+
+    async def scenario():
+        database = service_factory.tmp_path / "writer-conflict.sqlite"
+        runtime = ForkingRuntime()
+        service = AgentService(database, runtime)
+        await service.start()
+        service.store.save_thread("mic-a", 1, "desktop-owned")
+        result = await service_factory.complete_for_test(service, "mic-a", "fork-1", "Привет")
+        assert result.status == "completed"
+        assert service.session_for("mic-a") == "forked-thread"
+        assert runtime.calls[-1].thread_id == "forked-thread"
+        await service.close()
+        restarted = AgentService(database, runtime)
+        await restarted.start()
+        result = await service_factory.complete_for_test(restarted, "mic-a", "fork-2", "Продолжим")
+        assert result.status == "completed"
+        assert restarted.session_for("mic-a") == "forked-thread"
+        await restarted.close()
+
+    asyncio.run(scenario())

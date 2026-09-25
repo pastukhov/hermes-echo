@@ -13,6 +13,7 @@
 
 #include <unity.h>
 
+#include "power_policy.h"
 #include "button_driver.h"
 #include "hardware.h"
 #include "http_session.h"
@@ -23,6 +24,42 @@
 #include "voice_settings.h"
 #include "voice_wifi_setup.h"
 #include "fakes/hw_fakes.h"
+
+static void test_battery_sleep_policy(void) {
+  /* Actual USB reading is 5: VIN and VBAT are both present. */
+  for (uint8_t source = 0; source < 8; ++source)
+    TEST_ASSERT_EQUAL(source == 4, power_source_is_battery_only(source));
+  uint32_t seconds = 99;
+  voice_settings_t settings;
+  TEST_ASSERT_EQUAL(ESP_OK, voice_settings_load(&settings));
+  TEST_ASSERT_EQUAL(30, settings.sleep_timeout_seconds);
+  const char *invalid[] = {"", "0", "4", "3601", "-30", "30s", "1.5", "999999999999", " 30"};
+  for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
+    TEST_ASSERT_FALSE(voice_settings_parse_sleep_timeout(invalid[i], &seconds));
+  TEST_ASSERT_EQUAL(99, seconds);
+  TEST_ASSERT_TRUE(voice_settings_parse_sleep_timeout("5", &seconds));
+  TEST_ASSERT_TRUE(voice_settings_parse_sleep_timeout("3600", &seconds));
+  TEST_ASSERT_EQUAL(3600, seconds);
+  power_policy_t p = {0};
+  TEST_ASSERT_FALSE(power_policy_should_sleep(&p, 0, true, false, 30000));
+  TEST_ASSERT_FALSE(power_policy_should_sleep(&p, 29999, true, false, 30000));
+  TEST_ASSERT_TRUE(power_policy_should_sleep(&p, 30000, true, false, 30000));
+  power_policy_reset(&p, 0);
+  TEST_ASSERT_FALSE(power_policy_should_sleep(&p, 0, true, false, 60000U));
+  TEST_ASSERT_FALSE(power_policy_should_sleep(&p, 59999, true, false, 60000U));
+  TEST_ASSERT_TRUE(power_policy_should_sleep(&p, 60000, true, false, 60000U));
+  /* USB or an unknown/failed power read cancels the entire idle interval. */
+  TEST_ASSERT_FALSE(power_policy_should_sleep(&p, 60001, false, false, 60000U));
+  TEST_ASSERT_FALSE(power_policy_should_sleep(&p, 90000, true, false, 60000U));
+  TEST_ASSERT_FALSE(power_policy_should_sleep(&p, 150000, true, true, 60000U));
+  TEST_ASSERT_FALSE(power_policy_should_sleep(&p, 150001, true, false, 60000U));
+  TEST_ASSERT_TRUE(power_policy_should_sleep(&p, 210001, true, false, 60000U));
+  /* Activity between PMIC polls and clock wrap both behave correctly. */
+  power_policy_reset(&p, UINT32_MAX - 1000);
+  TEST_ASSERT_FALSE(power_policy_should_sleep(&p, UINT32_MAX - 1000, true, false, 60000U));
+  TEST_ASSERT_FALSE(power_policy_should_sleep(&p, 58998, true, false, 60000U));
+  TEST_ASSERT_TRUE(power_policy_should_sleep(&p, 58999, true, false, 60000U));
+}
 
 /* app API (declared here; test build has no VOICE_WITH_MAIN, so main() is
  * not compiled into main.c). */
@@ -287,6 +324,7 @@ static void test_full_state_machine_scenario(void) {
 
 int main(void) {
   UNITY_BEGIN();
+  RUN_TEST(test_battery_sleep_policy);
   RUN_TEST(test_full_state_machine_scenario);
   RUN_TEST(test_ring_buffer_overflow_recovery);
   RUN_TEST(test_max_record_seconds_auto_finish);

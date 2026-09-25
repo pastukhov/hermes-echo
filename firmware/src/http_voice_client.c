@@ -6,6 +6,7 @@
 
 #ifdef ESP_PLATFORM
 #include "esp_http_client.h"
+#include "voice_wireguard.h"
 #include "esp_log.h"
 static const char *TAG = "voice_http";
 
@@ -14,6 +15,7 @@ static int write_socket(void *context, const char *data, size_t length) {
 }
 
 static voice_transport_result_t begin(voice_transport_t *t) {
+  if (!voice_wireguard_ready()) return VOICE_TRANSPORT_FATAL;
   http_voice_client_t *c = (http_voice_client_t *)t->ctx;
   if (c->config.protocol_version == 2) c->turn_id[0] = '\0';
   const char *url = c->config.url;
@@ -24,6 +26,7 @@ static voice_transport_result_t begin(voice_transport_t *t) {
     url = c->upload_url;
   }
   esp_http_client_config_t cfg = {.url = url,
+                                  .if_name = voice_wireguard_interface(),
                                   .timeout_ms = c->config.timeout_ms > 0 ? c->config.timeout_ms : 15000};
   c->client = esp_http_client_init(&cfg);
   if (!c->client) return VOICE_TRANSPORT_FATAL;

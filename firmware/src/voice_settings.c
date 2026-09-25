@@ -35,11 +35,29 @@ static void defaults(voice_settings_t *s) {
   copy_field(s->wifi_password, sizeof(s->wifi_password), VOICE_WIFI_PASSWORD);
   copy_field(s->gateway_url, sizeof(s->gateway_url), VOICE_GATEWAY_URL);
   copy_field(s->device_token, sizeof(s->device_token), VOICE_DEVICE_TOKEN);
+  s->wireguard.port = 51820;
+  s->wireguard.keepalive = 25;
+  copy_field(s->wireguard.netmask, sizeof(s->wireguard.netmask), "255.255.255.0");
+  copy_field(s->wireguard.ntp_server, sizeof(s->wireguard.ntp_server), "pool.ntp.org");
   s->protocol_version = 1;
+  s->sleep_timeout_seconds = VOICE_SLEEP_DEFAULT_SECONDS;
+}
+
+bool voice_settings_parse_sleep_timeout(const char *value, uint32_t *seconds) {
+  if (!value || !value[0] || !seconds) return false;
+  uint32_t n = 0;
+  for (const char *p = value; *p; ++p) {
+    if (*p < '0' || *p > '9') return false;
+    n = n * 10 + (uint32_t)(*p - '0');
+    if (n > VOICE_SLEEP_MAX_SECONDS) return false;
+  }
+  if (n < VOICE_SLEEP_MIN_SECONDS) return false;
+  *seconds = n;
+  return true;
 }
 
 bool voice_settings_valid(const voice_settings_t *s) {
-  if (!s || !s->wifi_ssid[0] || !s->device_id[0] ||
+  if (!s || !voice_wireguard_valid(&s->wireguard) || !s->wifi_ssid[0] || !s->device_id[0] ||
       (s->protocol_version != 1 && s->protocol_version != 2)) return false;
   const char *url = s->gateway_url;
   const char *host = NULL;
@@ -79,6 +97,13 @@ esp_err_t voice_settings_load(voice_settings_t *s) {
   if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
   if (err != ESP_OK) return err;
   field_t fields[] = {
+    {"wg_address", s->wireguard.address, sizeof(s->wireguard.address)},
+    {"wg_netmask", s->wireguard.netmask, sizeof(s->wireguard.netmask)},
+    {"wg_private_key", s->wireguard.private_key, sizeof(s->wireguard.private_key)},
+    {"wg_public_key", s->wireguard.public_key, sizeof(s->wireguard.public_key)},
+    {"wg_psk", s->wireguard.preshared_key, sizeof(s->wireguard.preshared_key)},
+    {"wg_endpoint", s->wireguard.endpoint, sizeof(s->wireguard.endpoint)},
+    {"wg_ntp_server", s->wireguard.ntp_server, sizeof(s->wireguard.ntp_server)},
     {"wifi_ssid", s->wifi_ssid, sizeof(s->wifi_ssid)},
     {"wifi_password", s->wifi_password, sizeof(s->wifi_password)},
     {"gateway_url", s->gateway_url, sizeof(s->gateway_url)},
@@ -91,10 +116,21 @@ esp_err_t voice_settings_load(voice_settings_t *s) {
     size_t len = fields[i].cap;
     (void)nvs_get_str(h, fields[i].key, fields[i].value, &len);
   }
+  uint8_t enabled = 0, full_tunnel = 0;
+  (void)nvs_get_u8(h, "wg_enabled", &enabled);
+  (void)nvs_get_u8(h, "wg_full_tunnel", &full_tunnel);
+  s->wireguard.enabled = enabled != 0;
+  s->wireguard.full_tunnel = full_tunnel != 0;
+  (void)nvs_get_u16(h, "wg_port", &s->wireguard.port);
+  (void)nvs_get_u16(h, "wg_keepalive", &s->wireguard.keepalive);
   int32_t protocol_version = 1;
   if (nvs_get_i32(h, "protocol_version", &protocol_version) == ESP_OK &&
       (protocol_version == 1 || protocol_version == 2))
     s->protocol_version = protocol_version;
+  uint32_t sleep_seconds;
+  if (nvs_get_u32(h, "sleep_seconds", &sleep_seconds) == ESP_OK &&
+      sleep_seconds >= VOICE_SLEEP_MIN_SECONDS && sleep_seconds <= VOICE_SLEEP_MAX_SECONDS)
+    s->sleep_timeout_seconds = sleep_seconds;
   nvs_close(h);
   return ESP_OK;
 }
@@ -105,6 +141,13 @@ esp_err_t voice_settings_save(const voice_settings_t *s) {
   esp_err_t err = nvs_open("hermes", NVS_READWRITE, &h);
   if (err != ESP_OK) return err;
   const struct { const char *key; const char *value; } fields[] = {
+    {"wg_address", s->wireguard.address},
+    {"wg_netmask", s->wireguard.netmask},
+    {"wg_private_key", s->wireguard.private_key},
+    {"wg_public_key", s->wireguard.public_key},
+    {"wg_psk", s->wireguard.preshared_key},
+    {"wg_endpoint", s->wireguard.endpoint},
+    {"wg_ntp_server", s->wireguard.ntp_server},
     {"wifi_ssid", s->wifi_ssid}, {"wifi_password", s->wifi_password},
     {"gateway_url", s->gateway_url}, {"device_id", s->device_id},
     {"device_token", s->device_token}, {"request_id", s->request_id},
@@ -116,6 +159,11 @@ esp_err_t voice_settings_save(const voice_settings_t *s) {
   }
   if (err == ESP_OK && (s->protocol_version == 1 || s->protocol_version == 2))
     err = nvs_set_i32(h, "protocol_version", s->protocol_version);
+  if (err == ESP_OK) err = nvs_set_u32(h, "sleep_seconds", s->sleep_timeout_seconds);
+  if (err == ESP_OK) err = nvs_set_u8(h, "wg_enabled", s->wireguard.enabled);
+  if (err == ESP_OK) err = nvs_set_u8(h, "wg_full_tunnel", s->wireguard.full_tunnel);
+  if (err == ESP_OK) err = nvs_set_u16(h, "wg_port", s->wireguard.port);
+  if (err == ESP_OK) err = nvs_set_u16(h, "wg_keepalive", s->wireguard.keepalive);
   if (err == ESP_OK) err = nvs_commit(h);
   nvs_close(h);
   return err;

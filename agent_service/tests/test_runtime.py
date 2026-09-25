@@ -284,3 +284,53 @@ def test_smoke_report_records_versions_model_and_result_without_credentials() ->
     assert report["reply"] == "Готово"
     assert report["duration_ms"] >= 0
     assert "token" not in str(report).lower()
+
+
+def test_writer_conflict_forks_history_and_reuses_owned_thread() -> None:
+    from openai_codex.errors import InvalidRequestError
+
+    class LockedCodex(FakeCodex):
+        async def thread_resume(self, thread_id, **kwargs):
+            self.resumed_ids.append(thread_id)
+            raise InvalidRequestError(-32600, f"thread {thread_id} already has an active writer")
+
+        async def thread_fork(self, thread_id, **kwargs):
+            self.forked_id = thread_id
+            self.fork_args = kwargs
+            self.thread.id = "forked-thread"
+            return self.thread
+
+    async def scenario():
+        client = LockedCodex()
+        runtime = CodexRuntime(_config(), client_factory=_factory(client))
+        await runtime.start()
+        assert await runtime.run("desktop-owned", "Проверка") == "Проверка"
+        assert client.forked_id == "desktop-owned"
+        assert client.fork_args["sandbox"].value == "read-only"
+        assert client.fork_args["approval_mode"].value == "deny_all"
+        assert await runtime.resume_thread("forked-thread") == "forked-thread"
+        assert client.resumed_ids == ["desktop-owned"]
+        assert await runtime.run("forked-thread", "Ещё раз") == "Проверка"
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_other_resume_errors_do_not_fork() -> None:
+    from openai_codex.errors import InvalidRequestError
+
+    class BrokenCodex(FakeCodex):
+        async def thread_resume(self, thread_id, **kwargs):
+            raise InvalidRequestError(-32600, "thread does not exist")
+
+        async def thread_fork(self, *args, **kwargs):
+            pytest.fail("unrelated failures must not fork")
+
+    async def scenario():
+        runtime = CodexRuntime(_config(), client_factory=_factory(BrokenCodex()))
+        await runtime.start()
+        with pytest.raises(RuntimeFailure):
+            await runtime.resume_thread("missing")
+        await runtime.close()
+
+    asyncio.run(scenario())

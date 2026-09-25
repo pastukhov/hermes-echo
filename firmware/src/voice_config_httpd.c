@@ -72,13 +72,16 @@ static const char k_html[] =
   "<label>SSID (required)</label><input id='ssid' autocomplete='off'><label>Password</label><input id='pass' type='password' placeholder='blank keeps saved password'>"
   "<label>Gateway endpoint (required)</label><input id='url' placeholder='http://192.168.1.10:8080/api/v1/voice/turn'><div class='muted' id='gateway-help'>For v1, use the full /api/v1/voice/turn endpoint.</div>"
   "<label id='token-label'>Device token (optional)</label><input id='token' type='password' placeholder='blank keeps saved token'>"
+  "<label for='sleep-seconds'>Battery sleep timeout (seconds)</label><input id='sleep-seconds' type='number' min='5' max='3600' step='1' value='30'><div class='muted'>5–3600 seconds of inactivity. No automatic sleep on USB power.</div>"
+  "<fieldset><legend>WireGuard VPN</legend><label><input id='wg-enabled' type='checkbox' style='width:auto'> Enable WireGuard</label><label for='wg-address'>VPN IPv4 address</label><input id='wg-address' type='text' placeholder='10.7.0.2' autocomplete='off'><label for='wg-netmask'>VPN subnet mask</label><input id='wg-netmask' type='text' placeholder='255.255.255.0' autocomplete='off'><label for='wg-endpoint'>Server hostname or IPv4</label><input id='wg-endpoint' type='text' placeholder='vpn.example.com' autocomplete='off'><label for='wg-port'>Server UDP port</label><input id='wg-port' type='number' placeholder='51820' autocomplete='off'><label for='wg-public_key'>Peer public key</label><input id='wg-public_key' type='text' placeholder='' autocomplete='off'><label for='wg-private_key'>Device private key</label><input id='wg-private_key' type='password' placeholder='blank keeps saved key' autocomplete='off'><label for='wg-preshared_key'>Preshared key (optional)</label><input id='wg-preshared_key' type='password' placeholder='blank keeps saved key' autocomplete='off'><label for='wg-keepalive'>Persistent keepalive (seconds; 0 disables)</label><input id='wg-keepalive' type='number' placeholder='25' autocomplete='off'><label for='wg-ntp_server'>NTP server reachable before VPN</label><input id='wg-ntp_server' type='text' placeholder='pool.ntp.org' autocomplete='off'><label><input id='wg-clear-psk' type='checkbox' style='width:auto'> Remove saved preshared key</label><label><input id='wg-full_tunnel' type='checkbox' style='width:auto'> Full IPv4 tunnel (AllowedIPs 0.0.0.0/0)</label><div class='muted'>By default the VPN subnet is allowed. Use the gateway VPN address in that subnet. VPN and Wi-Fi/setup subnets must not overlap. Blank keys keep saved values. <span id='wg-keys'></span></div><div class='muted' id='wg-status'></div></fieldset>"
   "<button class='save' onclick='saveCfg()'>Save &amp; Restart</button><div class='muted' id='info'></div></div>"
   "<div class='card'><b>Status</b><div id='status' class='muted' style='margin-top:6px'>loading…</div></div>"
-  "<script>const $=x=>document.getElementById(x);let savedToken=false;function updateProtocol(){const v2=$('protocol').value==='2';$('gateway-help').textContent=v2?'For v2, use only the Gateway base URL, e.g. http://192.168.1.10:8080.':'For v1, use the full /api/v1/voice/turn endpoint.';$('token-label').textContent=v2?'Device token (required for v2)':'Device token (optional)';}async function load(){try{const j=await (await fetch('/config')).json();$('ssid').value=j.wifi_ssid||'';$('url').value=j.gateway_url||'';$('protocol').value=String(j.protocol_version||1);savedToken=!!j.device_token_set;updateProtocol();$('ip').textContent=j.ip&&j.ip!=='0.0.0.0'?'· '+j.ip:'';$('status').textContent=j.wifi_connected?'Wi‑Fi connected · '+j.ip:'Setup access point · '+j.ap_ip;}catch(e){$('status').textContent='status unavailable';}}"
+  "<script>const $=x=>document.getElementById(x);let savedToken=false;function updateProtocol(){const v2=$('protocol').value==='2';$('gateway-help').textContent=v2?'For v2, use only the Gateway base URL, e.g. http://192.168.1.10:8080.':'For v1, use the full /api/v1/voice/turn endpoint.';$('token-label').textContent=v2?'Device token (required for v2)':'Device token (optional)';}async function load(){try{const j=await (await fetch('/config')).json();$('ssid').value=j.wifi_ssid||'';$('url').value=j.gateway_url||'';$('protocol').value=String(j.protocol_version||1);$('sleep-seconds').value=String(j.sleep_timeout_seconds??30);savedToken=!!j.device_token_set;$('wg-enabled').checked=!!j.wg_enabled;$('wg-full_tunnel').checked=!!j.wg_full_tunnel;$('wg-address').value=String(j.wg_address??\"\");$('wg-netmask').value=String(j.wg_netmask??\"255.255.255.0\");$('wg-endpoint').value=String(j.wg_endpoint??\"\");$('wg-port').value=String(j.wg_port??\"51820\");$('wg-public_key').value=String(j.wg_public_key??\"\");$('wg-keepalive').value=String(j.wg_keepalive??\"25\");$('wg-ntp_server').value=String(j.wg_ntp_server??\"pool.ntp.org\");$('wg-keys').textContent='Private key: '+(j.wg_private_key_set?'saved':'missing')+'; PSK: '+(j.wg_preshared_key_set?'saved':'none');$('wg-status').textContent='WireGuard: '+(j.wg_status||'disabled');updateProtocol();$('ip').textContent=j.ip&&j.ip!=='0.0.0.0'?'· '+j.ip:'';$('status').textContent=j.wifi_connected?'Wi‑Fi connected · '+j.ip:'Setup access point · '+j.ap_ip;}catch(e){$('status').textContent='status unavailable';}}"
   "async function scanWifi(){const sel=$('scan');sel.replaceChildren(new Option('scanning…',''));try{const j=await (await fetch('/wifi_scan')).json();if(!j.ok&&j.scanning){setTimeout(scanWifi,1000);return;}if(!j.ok)throw new Error('scan failed');sel.replaceChildren(new Option('— select network —',''));for(const n of (j.networks||[])){sel.add(new Option(n.ssid+' ('+n.rssi+' dBm)',n.ssid));}sel.onchange=()=>{if(sel.value)$('ssid').value=sel.value;};}catch(e){sel.replaceChildren(new Option('scan failed',''));}}"
-  "async function saveCfg(){const ssid=$('ssid').value.trim(),url=$('url').value.trim(),protocol=$('protocol').value;if(!ssid){$('info').textContent='Enter Wi-Fi network (SSID)';return;}if(!url){$('info').textContent='Enter Gateway endpoint';return;}if(!url.startsWith('http://')&&!url.startsWith('https://')){$('info').textContent='Gateway endpoint must start with http:// or https://';return;}if(protocol==='2'){if(!$('token').value&&!savedToken){$('info').textContent='Enter the required device token for v2';return;}try{const parsed=new URL(url);if(parsed.pathname!=='/'||parsed.search||parsed.hash){$('info').textContent='For v2, enter the Gateway base URL without a path';return;}}catch(e){$('info').textContent='Enter a valid Gateway base URL';return;}}const body=new URLSearchParams({wifi_ssid:ssid,wifi_password:$('pass').value,gateway_url:url,device_token:$('token').value,protocol_version:protocol});$('info').textContent='saving…';const r=await fetch('/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});$('info').textContent=r.ok?'saved; restarting…':'save failed';}load();scanWifi();</script></body></html>";
+  "async function saveCfg(){const ssid=$('ssid').value.trim(),url=$('url').value.trim(),protocol=$('protocol').value;if(!ssid){$('info').textContent='Enter Wi-Fi network (SSID)';return;}if(!url){$('info').textContent='Enter Gateway endpoint';return;}if(!url.startsWith('http://')&&!url.startsWith('https://')){$('info').textContent='Gateway endpoint must start with http:// or https://';return;}if(protocol==='2'){if(!$('token').value&&!savedToken){$('info').textContent='Enter the required device token for v2';return;}try{const parsed=new URL(url);if(parsed.pathname!=='/'||parsed.search||parsed.hash){$('info').textContent='For v2, enter the Gateway base URL without a path';return;}}catch(e){$('info').textContent='Enter a valid Gateway base URL';return;}}const sleep=$('sleep-seconds').value;if(!/^[0-9]+$/.test(sleep)||Number(sleep)<5||Number(sleep)>3600){$('info').textContent='Sleep timeout must be a whole number from 5 to 3600 seconds';return;}const body=new URLSearchParams({wifi_ssid:ssid,wifi_password:$('pass').value,gateway_url:url,device_token:$('token').value,protocol_version:protocol,sleep_timeout_seconds:sleep});body.set('wg_enabled',$('wg-enabled').checked?'1':'0');body.set('wg_full_tunnel',$('wg-full_tunnel').checked?'1':'0');body.set('wg_clear_psk',$('wg-clear-psk').checked?'1':'0');body.set('wg_address',$('wg-address').value.trim());body.set('wg_netmask',$('wg-netmask').value.trim());body.set('wg_endpoint',$('wg-endpoint').value.trim());body.set('wg_port',$('wg-port').value.trim());body.set('wg_public_key',$('wg-public_key').value.trim());body.set('wg_private_key',$('wg-private_key').value.trim());body.set('wg_preshared_key',$('wg-preshared_key').value.trim());body.set('wg_keepalive',$('wg-keepalive').value.trim());body.set('wg_ntp_server',$('wg-ntp_server').value.trim());$('info').textContent='saving…';const r=await fetch('/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});$('info').textContent=r.ok?'saved; restarting…':'save failed';}async function refreshWg(){try{const j=await(await fetch('/config')).json();$('wg-status').textContent='WireGuard: '+j.wg_status;}catch(e){}}load();scanWifi();setInterval(refreshWg,3000);</script></body></html>";
 
 static esp_err_t send_json(httpd_req_t *req, const char *body) {
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
@@ -142,15 +145,35 @@ static esp_err_t h_config_get(httpd_req_t *req) {
   char ip[16] = "0.0.0.0", ap_addr[16] = "192.168.4.1";
   if (sta_ip.ip.addr) snprintf(ip, sizeof(ip), "%u.%u.%u.%u", IP2STR(&sta_ip.ip));
   if (ap_ip.ip.addr) snprintf(ap_addr, sizeof(ap_addr), "%u.%u.%u.%u", IP2STR(&ap_ip.ip));
-  char body[1024]; size_t used = 0;
+  char body[4096]; size_t used = 0;
   used += (size_t)snprintf(body, sizeof(body), "{\"wifi_ssid\":");
   if (!json_string(body, sizeof(body), &used, s_settings->wifi_ssid)) return ESP_FAIL;
   used += (size_t)snprintf(body + used, sizeof(body) - used, ",\"gateway_url\":");
   if (!json_string(body, sizeof(body), &used, s_settings->gateway_url)) return ESP_FAIL;
   used += (size_t)snprintf(body + used, sizeof(body) - used, ",\"device_id\":");
   if (!json_string(body, sizeof(body), &used, s_settings->device_id)) return ESP_FAIL;
+  used += (size_t)snprintf(body + used, sizeof(body) - used, ",\"wg_address\":");
+  if (!json_string(body, sizeof(body), &used, s_settings->wireguard.address)) return ESP_FAIL;
+  used += (size_t)snprintf(body + used, sizeof(body) - used, ",\"wg_netmask\":");
+  if (!json_string(body, sizeof(body), &used, s_settings->wireguard.netmask)) return ESP_FAIL;
+  used += (size_t)snprintf(body + used, sizeof(body) - used, ",\"wg_endpoint\":");
+  if (!json_string(body, sizeof(body), &used, s_settings->wireguard.endpoint)) return ESP_FAIL;
+  used += (size_t)snprintf(body + used, sizeof(body) - used, ",\"wg_public_key\":");
+  if (!json_string(body, sizeof(body), &used, s_settings->wireguard.public_key)) return ESP_FAIL;
+  used += (size_t)snprintf(body + used, sizeof(body) - used, ",\"wg_ntp_server\":");
+  if (!json_string(body, sizeof(body), &used, s_settings->wireguard.ntp_server)) return ESP_FAIL;
   used += (size_t)snprintf(body + used, sizeof(body) - used,
-      ",\"protocol_version\":%ld,\"ip\":\"%s\",\"ap_ip\":\"%s\",\"wifi_connected\":%s,\"wifi_password_set\":%s,\"device_token_set\":%s}",
+      ",\"wg_enabled\":%s,\"wg_full_tunnel\":%s,\"wg_port\":%u,\"wg_keepalive\":%u,"
+      "\"wg_private_key_set\":%s,\"wg_preshared_key_set\":%s,\"wg_status\":\"%s\"",
+      s_settings->wireguard.enabled ? "true" : "false",
+      s_settings->wireguard.full_tunnel ? "true" : "false",
+      s_settings->wireguard.port, s_settings->wireguard.keepalive,
+      s_settings->wireguard.private_key[0] ? "true" : "false",
+      s_settings->wireguard.preshared_key[0] ? "true" : "false",
+      voice_wireguard_status());
+  used += (size_t)snprintf(body + used, sizeof(body) - used,
+      ",\"sleep_timeout_seconds\":%lu,\"protocol_version\":%ld,\"ip\":\"%s\",\"ap_ip\":\"%s\",\"wifi_connected\":%s,\"wifi_password_set\":%s,\"device_token_set\":%s}",
+      (unsigned long)s_settings->sleep_timeout_seconds,
       (long)s_settings->protocol_version,
       ip, ap_addr, sta_ip.ip.addr ? "true" : "false",
       s_settings->wifi_password[0] ? "true" : "false",
@@ -158,71 +181,14 @@ static esp_err_t h_config_get(httpd_req_t *req) {
   return send_json(req, body);
 }
 
-static bool decode_form_component(const char *src, size_t len, char *dst, size_t cap) {
-  size_t out = 0;
-  for (size_t i = 0; i < len; ++i) {
-    unsigned char ch = (unsigned char)src[i];
-    if (ch == '+') ch = ' ';
-    else if (ch == '%') {
-      if (i + 2 >= len) return false;
-      char hex[3] = {src[i + 1], src[i + 2], 0};
-      char *end = NULL;
-      unsigned long value = strtoul(hex, &end, 16);
-      if (end != hex + 2 || value == 0 || value > 0xff) return false;
-      ch = (unsigned char)value;
-      i += 2;
-    }
-    if (ch < 0x20 || ch == 0x7f || out + 1 >= cap) return false;
-    dst[out++] = (char)ch;
-  }
-  dst[out] = '\0';
-  return true;
-}
-
-static bool update_form_field(char *dst, size_t cap, const char *value) {
-  size_t n = strlen(value);
-  if (n >= cap) return false;
-  memcpy(dst, value, n + 1);
-  return true;
-}
-
-static bool parse_config_form(char *body, voice_settings_t *next) {
-  char *cursor = body;
-  while (*cursor) {
-    char *pair_end = strchr(cursor, '&');
-    if (!pair_end) pair_end = cursor + strlen(cursor);
-    char *equals = memchr(cursor, '=', (size_t)(pair_end - cursor));
-    if (equals) {
-      char key[40], value[256];
-      if (!decode_form_component(cursor, (size_t)(equals - cursor), key, sizeof(key)) ||
-          !decode_form_component(equals + 1, (size_t)(pair_end - equals - 1), value, sizeof(value))) return false;
-      char *dst = NULL; size_t cap = 0;
-      if (strcmp(key, "protocol_version") == 0) {
-        if (strcmp(value, "1") == 0) next->protocol_version = 1;
-        else if (strcmp(value, "2") == 0) next->protocol_version = 2;
-        else return false;
-      }
-      else if (strcmp(key, "wifi_ssid") == 0) { dst = next->wifi_ssid; cap = sizeof(next->wifi_ssid); }
-      else if (strcmp(key, "wifi_password") == 0) { dst = next->wifi_password; cap = sizeof(next->wifi_password); }
-      else if (strcmp(key, "gateway_url") == 0) { dst = next->gateway_url; cap = sizeof(next->gateway_url); }
-      else if (strcmp(key, "device_token") == 0) { dst = next->device_token; cap = sizeof(next->device_token); }
-      /* Empty secret fields mean "keep the saved secret" in this UI. */
-      if (dst && !((strcmp(key, "wifi_password") == 0 || strcmp(key, "device_token") == 0) && !value[0]) &&
-          !update_form_field(dst, cap, value)) return false;
-    }
-    cursor = *pair_end ? pair_end + 1 : pair_end;
-  }
-  return voice_settings_valid(next);
-}
-
 static esp_err_t h_config_post(httpd_req_t *req) {
   if (!allow_setup_client(req)) return ESP_OK;
-  if (req->content_len <= 0 || req->content_len >= 2048) return ESP_ERR_INVALID_SIZE;
-  char body[2048]; int got = 0;
+  if (req->content_len <= 0 || req->content_len >= 4096) return ESP_ERR_INVALID_SIZE;
+  char body[4096]; int got = 0;
   while (got < req->content_len) { int n = httpd_req_recv(req, body + got, req->content_len - got); if (n <= 0) return ESP_FAIL; got += n; }
   body[got] = 0;
   voice_settings_t next = *s_settings;
-  if (!parse_config_form(body, &next)) {
+  if (!voice_config_parse_form(body, &next)) {
     httpd_resp_set_status(req, "400 Bad Request");
     return send_json(req, "{\"ok\":false,\"error\":\"invalid settings\"}");
   }
@@ -305,7 +271,7 @@ void voice_config_httpd_start(voice_settings_t *settings) {
   s_settings = settings;
   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
   cfg.server_port = 80;
-  cfg.stack_size = 8192;
+  cfg.stack_size = 12288;
   if (httpd_start(&s_server, &cfg) != ESP_OK) { ESP_LOGE(TAG, "HTTP server start failed"); return; }
   static const httpd_uri_t root = {.uri = "/", .method = HTTP_GET, .handler = h_root};
   static const httpd_uri_t get_cfg = {.uri = "/config", .method = HTTP_GET, .handler = h_config_get};

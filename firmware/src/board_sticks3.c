@@ -3,6 +3,8 @@
 #include "audio_capture.h"
 #include "audio_playback.h"
 #include "screen_ui.h"
+#include "screen_brightness.h"
+#include "driver/ledc.h"
 #include "screen_font.h"
 #include "voice_config_httpd.h"
 #include "voice_wifi_setup.h"
@@ -30,6 +32,7 @@
 #include "freertos/task.h"
 
 static const char *TAG = "sticks3";
+static screen_brightness_t s_brightness;
 static i2c_master_bus_handle_t s_power_bus;
 static i2c_master_dev_handle_t s_pm1;
 /* Hold peripheral outputs low while their power rail is off. */
@@ -296,7 +299,20 @@ static void lcd_init(void) {
   uint8_t colmod = 0x55; lcd_cmd(0x3A); lcd_data(&colmod, 1);
   uint8_t madctl = 0x00; lcd_cmd(0x36); lcd_data(&madctl, 1);
   lcd_cmd(0x21); /* M5StickS3 panel requires inversion. */
-  lcd_cmd(0x29); gpio_set_level(BOARD_LCD_BL_GPIO, 1); s_lcd_ready = true;
+  lcd_cmd(0x29);
+  ledc_timer_config_t timer = {
+    .speed_mode = LEDC_LOW_SPEED_MODE, .duty_resolution = LEDC_TIMER_10_BIT,
+    .timer_num = LEDC_TIMER_0, .freq_hz = 5000, .clk_cfg = LEDC_AUTO_CLK,
+  };
+  ESP_ERROR_CHECK(ledc_timer_config(&timer));
+  ledc_channel_config_t backlight = {
+    .gpio_num = BOARD_LCD_BL_GPIO, .speed_mode = LEDC_LOW_SPEED_MODE,
+    .channel = LEDC_CHANNEL_0, .timer_sel = LEDC_TIMER_0,
+    .duty = 1023, .hpoint = 0,
+  };
+  ESP_ERROR_CHECK(ledc_channel_config(&backlight));
+  ESP_LOGI(TAG, "Backlight PWM ready: 100%%");
+  s_lcd_ready = true;
 }
 /* Called only by the main loop; never sleep during a voice worker. */
 void board_sticks3_power_tick(bool busy, uint32_t now_ms, uint32_t timeout_ms) {
@@ -305,6 +321,12 @@ void board_sticks3_power_tick(bool busy, uint32_t now_ms, uint32_t timeout_ms) {
   static int last_source = -1;
   static voice_wifi_portal_t portal;
   bool key2 = gpio_get_level(BOARD_KEY2_GPIO) == 0;
+  if (s_lcd_ready && screen_brightness_tick(&s_brightness, key2, now_ms)) {
+    unsigned percent = screen_brightness_percent(&s_brightness);
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 1023 * percent / 100));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+    ESP_LOGI(TAG, "Backlight: %u%%", percent);
+  }
   s_manual_setup = voice_wifi_portal_tick(&portal, key2, busy, now_ms);
   busy |= s_manual_setup || voice_wifi_search_grace(s_wifi_connected, s_wifi_started_ms, now_ms);
   bool key_pressed = hw_button_raw() || key2;
@@ -351,6 +373,7 @@ void board_sticks3_power_tick(bool busy, uint32_t now_ms, uint32_t timeout_ms) {
     return;
   }
   ESP_LOGI(TAG, "Battery idle: entering deep sleep; wake by key or external power");
+  (void)ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
   if (s_audio_ready) {
     audio_capture_deinit();
     s_audio_ready = false;

@@ -380,6 +380,7 @@ void board_sticks3_power_tick(bool busy, uint32_t now_ms, uint32_t timeout_ms) {
 #define C_MUTED 0x74B3
 #define C_WHITE 0xEF9F
 #define C_LINE 0x1988
+#define C_CONNECTED 0x07E0
 
 
 static void screen_pixel(int x, int y, uint16_t color) {
@@ -417,7 +418,7 @@ static void screen_hint(const char *hint) {
 }
 
 static void screen_wifi_icon(bool connected) {
-  uint16_t color = connected ? 0x38B8 : C_MUTED;
+  uint16_t color = connected ? C_CONNECTED : C_MUTED;
   // Two circular arcs and a dot: connection status, not signal strength.
   for (int y = -12; y <= -3; ++y) {
     for (int x = -12; x <= 12; ++x) {
@@ -432,7 +433,7 @@ static void screen_wifi_icon(bool connected) {
 
 static void screen_wireguard_icon(const char *status, int phase) {
   uint16_t color = C_MUTED;
-  if (strcmp(status, "connected") == 0) color = 0x07E0;
+  if (strcmp(status, "connected") == 0) color = C_CONNECTED;
   else if (strcmp(status, "error") == 0 || strcmp(status, "subnet_conflict") == 0)
     color = 0xF800;
   else if (strcmp(status, "disabled") != 0)

@@ -156,7 +156,7 @@ static const char k_html[] =
   "</div>\n"
   "<div class='card'>\n"
   "<b>Сброс настроек</b>\n"
-  "<p class='muted'>Удалить все сети Wi-Fi, пароли, настройки сервера и WireGuard. Таймер сна вернётся к 30 секундам.</p>\n"
+  "<p class='muted'>Удалить все сети Wi-Fi, пароли, настройки сервера и WireGuard. Таймер сна вернётся к 30 секундам, яркость — к 100%.</p>\n"
   "<button id='reset-settings' class='save reset' onclick='resetCfg()'>Сбросить все настройки</button>\n"
   "<div id='reset-status' class='muted' role='status'>\n"
   "</div>\n"

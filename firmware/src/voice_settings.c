@@ -1,4 +1,5 @@
 #include "voice_settings.h"
+#include "screen_brightness.h"
 #include "voice_turn_client.h"
 
 #include <stdio.h>
@@ -218,18 +219,51 @@ esp_err_t voice_settings_save(const voice_settings_t *s) {
   return err;
 }
 
+// Independent key: voice-worker snapshots must not overwrite a button change.
+uint8_t voice_settings_load_brightness(void) {
+  uint8_t level = 0;
+  nvs_handle_t h;
+  if (nvs_open("hermes", NVS_READONLY, &h) == ESP_OK) {
+    (void)nvs_get_u8(h, "lcd_brightness", &level);
+    nvs_close(h);
+  }
+  return level < SCREEN_BRIGHTNESS_LEVEL_COUNT ? level : 0;
+}
+
+static esp_err_t save_brightness_unlocked(uint8_t level) {
+  nvs_handle_t h;
+  esp_err_t err = nvs_open("hermes", NVS_READWRITE, &h);
+  if (err != ESP_OK) return err;
+  err = nvs_set_u8(h, "lcd_brightness", level);
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  return err;
+}
+
+esp_err_t voice_settings_save_brightness(uint8_t level) {
+  if (level >= SCREEN_BRIGHTNESS_LEVEL_COUNT) return ESP_ERR_INVALID_ARG;
+  if (!settings_mutex) return ESP_ERR_INVALID_STATE;
+  xSemaphoreTake(settings_mutex, portMAX_DELAY);
+  esp_err_t err = reset_pending ? ESP_ERR_INVALID_STATE : save_brightness_unlocked(level);
+  xSemaphoreGive(settings_mutex);
+  return err;
+}
+
 esp_err_t voice_settings_reset(void) {
   if (!settings_mutex) return ESP_ERR_INVALID_STATE;
   voice_settings_t clean;
   voice_settings_factory_defaults(&clean);
   xSemaphoreTake(settings_mutex, portMAX_DELAY);
   esp_err_t err = save_unlocked(&clean);
+  if (err == ESP_OK) err = save_brightness_unlocked(0);
   // Block stale worker snapshots from restoring credentials before reboot.
   if (err == ESP_OK) reset_pending = true;
   xSemaphoreGive(settings_mutex);
   return err;
 }
 #else
+uint8_t voice_settings_load_brightness(void) { return 0; }
+esp_err_t voice_settings_save_brightness(uint8_t level) { return level < SCREEN_BRIGHTNESS_LEVEL_COUNT ? ESP_OK : ESP_ERR_INVALID_ARG; }
 esp_err_t voice_settings_reset(void) { return ESP_OK; }
 esp_err_t voice_settings_load(voice_settings_t *s) {
   if (!s) return ESP_ERR_INVALID_ARG;

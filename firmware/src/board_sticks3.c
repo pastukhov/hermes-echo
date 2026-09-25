@@ -305,13 +305,15 @@ static void lcd_init(void) {
     .timer_num = LEDC_TIMER_0, .freq_hz = 5000, .clk_cfg = LEDC_AUTO_CLK,
   };
   ESP_ERROR_CHECK(ledc_timer_config(&timer));
+  screen_brightness_restore(&s_brightness, voice_settings_load_brightness());
+  unsigned percent = screen_brightness_percent(&s_brightness);
   ledc_channel_config_t backlight = {
     .gpio_num = BOARD_LCD_BL_GPIO, .speed_mode = LEDC_LOW_SPEED_MODE,
     .channel = LEDC_CHANNEL_0, .timer_sel = LEDC_TIMER_0,
-    .duty = 1023, .hpoint = 0,
+    .duty = 1023 * percent / 100, .hpoint = 0,
   };
   ESP_ERROR_CHECK(ledc_channel_config(&backlight));
-  ESP_LOGI(TAG, "Backlight PWM ready: 100%%");
+  ESP_LOGI(TAG, "Backlight PWM ready: %u%% (restored)", percent);
   s_lcd_ready = true;
 }
 /* Called only by the main loop; never sleep during a voice worker. */
@@ -325,7 +327,9 @@ void board_sticks3_power_tick(bool busy, uint32_t now_ms, uint32_t timeout_ms) {
     unsigned percent = screen_brightness_percent(&s_brightness);
     ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 1023 * percent / 100));
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
-    ESP_LOGI(TAG, "Backlight: %u%%", percent);
+    esp_err_t saved = voice_settings_save_brightness((uint8_t)s_brightness.level);
+    if (saved != ESP_OK) ESP_LOGE(TAG, "Cannot save backlight: %s", esp_err_to_name(saved));
+    ESP_LOGI(TAG, "Backlight: %u%%; saved=%d", percent, saved == ESP_OK);
   }
   s_manual_setup = voice_wifi_portal_tick(&portal, key2, busy, now_ms);
   busy |= s_manual_setup || voice_wifi_search_grace(s_wifi_connected, s_wifi_started_ms, now_ms);

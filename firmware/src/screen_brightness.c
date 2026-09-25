@@ -1,7 +1,10 @@
 #include "screen_brightness.h"
+void screen_brightness_restore(screen_brightness_t *state, unsigned level) {
+  state->level = level < SCREEN_BRIGHTNESS_LEVEL_COUNT ? level : 0;
+}
 unsigned screen_brightness_percent(const screen_brightness_t *state) {
-  static const unsigned levels[] = {100, 60, 30, 10};
-  return levels[state->level % 4];
+  static const unsigned levels[] = {100, 60, 30, 10, 5, 2};
+  return levels[state->level % SCREEN_BRIGHTNESS_LEVEL_COUNT];
 }
 bool screen_brightness_tick(screen_brightness_t *s, bool down, uint32_t now) {
   if (!s->initialized) {
@@ -19,7 +22,7 @@ bool screen_brightness_tick(screen_brightness_t *s, bool down, uint32_t now) {
   } else {
     bool short_press = s->armed && (uint32_t)(s->changed_ms - s->pressed_ms) < 3000;
     s->armed = false;
-    if (short_press) { s->level = (s->level + 1) % 4; return true; }
+    if (short_press) { s->level = (s->level + 1) % SCREEN_BRIGHTNESS_LEVEL_COUNT; return true; }
   }
   return false;
 }

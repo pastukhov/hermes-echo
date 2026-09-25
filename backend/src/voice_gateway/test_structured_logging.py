@@ -169,10 +169,18 @@ def test_full_successful_turn_stage_events_carry_minimal_fields(tmp_path: Path, 
 
 
 def test_error_turn_stage_event_carries_bounded_status_and_error(tmp_path: Path, caplog):
-    """An STT failure must still produce a well-formed stt stage record."""
+    """An STT failure must still produce a well-formed stt stage record.
+
+    Current main's ``voice_turn`` handler distinguishes ``STTClientError``
+    (mapped to ``stt_failed``/502) from any other unexpected exception
+    (mapped to ``internal_error``/500, and NOT logged as an ``stt`` stage
+    event — that branch is a generic "something broke" fallback, not a
+    pipeline-stage outcome). Raise ``STTClientError`` here to exercise the
+    stage-logged failure path.
+    """
     class _FailingSTT(FakeSTT):
         def transcribe(self, wav):
-            raise RuntimeError("stt exploded")
+            raise STTClientError("stt exploded")
 
     app = create_app(
         archive_root=tmp_path / "archive",

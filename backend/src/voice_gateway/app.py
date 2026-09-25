@@ -24,6 +24,10 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+import anyio
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from prometheus_client import generate_latest
 from starlette.datastructures import Headers
 
@@ -41,6 +45,7 @@ from backend.src.voice_gateway.archive import (
     atomic_write_json,
 )
 from backend.src.voice_gateway.config import (
+    DEFAULT_HERMES_MODEL,
     AgentConfig,
     AgentConfigError,
     HermesConfig,
@@ -511,7 +516,10 @@ def create_app(
                 error="wav finalization failed",
             )
             raise HTTPException(status_code=500, detail=str(ErrorCode.INTERNAL_ERROR))
-        pcm_path.unlink(missing_ok=True)
+        try:
+            pcm_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
         # archive stage succeeded (ТЗ §33): WAV finalized, PCM cleaned up.
         log_stage_event(
@@ -610,6 +618,7 @@ def create_app(
         atomic_write_json(turn_dir / "hermes-request.json",
                           {"turn_id": turn_id, "transcript": transcript.text})
 
+        model_name = (os.environ.get("HERMES_MODEL", "").strip() or DEFAULT_HERMES_MODEL)
         hermes_start = time.perf_counter()
         metrics.active_turns.inc()
         try:
@@ -642,8 +651,6 @@ def create_app(
                               {"raw": raw, "fallback": FALLBACK_REPLY})
             atomic_write_bytes(turn_dir / "reply.txt",
                                FALLBACK_REPLY.encode("utf-8"))
-<<<<<<< HEAD
-=======
             metrics.model_request_latency.labels(model_name=model_name).observe(
                 max(0.0, time.perf_counter() - hermes_start))
             metrics.model_request_count.labels(model_name=model_name,
@@ -653,15 +660,12 @@ def create_app(
                 duration_ms=_ms(time.perf_counter() - hermes_start),
                 status=e.status, error=e.error,
             )
->>>>>>> 3fdc6f8 (backend: structured JSON logging per pipeline stage (t_461c0f68, ТЗ §33))
             return fail_turn(e.status, e.error, input_bytes, audio_duration_ms,
                              extra={"transcript": transcript.text})
         finally:
             metrics.hermes_duration.observe(max(0.0, time.perf_counter() - hermes_start))
             metrics.active_turns.dec()
 
-<<<<<<< HEAD
-=======
         metrics.model_request_latency.labels(model_name=model_name).observe(
             max(0.0, time.perf_counter() - hermes_start))
         metrics.model_request_count.labels(model_name=model_name,
@@ -678,7 +682,6 @@ def create_app(
             logger.debug("hermes_reply", extra={"turn_id": turn_id,
                                                 "transcript": response.reply})
 
->>>>>>> 3fdc6f8 (backend: structured JSON logging per pipeline stage (t_461c0f68, ТЗ §33))
         # --- Success (ТЗ §19/§30): archive reply + note flag. The M2
         # response shape is preserved so the TTS child card can swap the
         # body for real audio later.

@@ -44,7 +44,7 @@ function addOpenNetwork(page, ssid='test') {
 test('scanner loads automatically and shows a single hidden editor', async()=>{
   const {elements,requested,context}=await openSetupPage();
   assert.ok(requested.some(r=>r.path==='/wifi_scan'));
-  assert.match(context.wifiRows()[0].status, /-52 dBm/);
+  assert.match(context.wifiRows()[0].status, /-52 дБм/);
   assert.equal(elements['wifi-editor'].hidden,true);
   assert.equal((html.match(/id='pass'/g)||[]).length,1);
   assert.equal(/id='(?:ssid[1-4]|pass[1-4]|wifi-slot)'/.test(html),false);
@@ -60,7 +60,7 @@ test('edits survive status updates and rescanning',async()=>{
 test('save explains missing gateway without posting secrets',async()=>{
   const page=await openSetupPage();addOpenNetwork(page);
   await page.context.saveCfg();
-  assert.match(page.elements.info.textContent,/Gateway endpoint/);
+  assert.match(page.elements.info.textContent,/адрес голосового сервера/);
   assert.equal(page.requested.some(r=>r.options?.method==='POST'),false);
 });
 test('setup saves without an editable device ID',async()=>{
@@ -74,7 +74,7 @@ test('setup exposes one protocol and a base URL without a version selector', asy
   const { elements } = await openSetupPage();
   assert.equal(elements.protocol, undefined);
   assert.doesNotMatch(html, /Voice protocol|synchronous|asynchronous/);
-  assert.match(elements['gateway-help'].textContent, /Base URL/i);
+  assert.match(elements['gateway-help'].textContent, /базовый адрес/i);
 });
 
 test('setup submits only with a device token and an origin URL', async () => {
@@ -84,7 +84,7 @@ test('setup submits only with a device token and an origin URL', async () => {
   context.applyWifi();
   elements.url.value = 'http://gateway.local:8080';
   await context.saveCfg();
-  assert.match(elements.info.textContent, /token/i);
+  assert.match(elements.info.textContent, /токен/i);
   assert.equal(requested.some(request => request.options?.method === 'POST'), false);
 
   elements.token.value = 'device-token';
@@ -95,7 +95,7 @@ test('setup submits only with a device token and an origin URL', async () => {
 
   elements.url.value = 'http://gateway.local:8080/api/v1/voice/turn';
   await context.saveCfg();
-  assert.match(elements.info.textContent, /base url/i);
+  assert.match(elements.info.textContent, /базовый адрес/i);
 });
 
 test('sleep timeout loads a saved value and is submitted in seconds', async () => {
@@ -119,7 +119,7 @@ test('sleep timeout defaults to 30 and rejects invalid values without posting', 
   for (const value of ['', '0', '4', '3601', '30s', '1.5', '-30']) {
     elements['sleep-seconds'].value = value;
     await context.saveCfg();
-    assert.match(elements.info.textContent, /Sleep timeout/);
+    assert.match(elements.info.textContent, /Время до сна/);
   }
   assert.equal(requested.some(r => r.options?.method === 'POST'), false);
 });
@@ -135,7 +135,7 @@ test('WireGuard loads public settings without filling secret inputs', async () =
   assert.equal(elements['wg-port'].value, '51821');
   assert.equal(elements['wg-private_key'].value, '');
   assert.equal(elements['wg-preshared_key'].value, '');
-  assert.match(elements['wg-status'].textContent, /connected/);
+  assert.match(elements['wg-status'].textContent, /подключён/);
   elements['wg-endpoint'].value = 'edited.example.com';
   for (const refresh of intervals) await refresh();
   assert.equal(elements['wg-endpoint'].value, 'edited.example.com');
@@ -156,7 +156,7 @@ test('saved networks get checkmarks and absent networks stay visible',async()=>{
   const page=await openSetupPage({wifi_networks:[{ssid:'Atitlan',password_set:true},{ssid:'Work',password_set:true}]});
   const rows=page.context.wifiRows();
   assert.equal(rows.find(n=>n.ssid==='Atitlan').saved,true);
-  assert.match(rows.find(n=>n.ssid==='Atitlan').status,/-52 dBm/);
+  assert.match(rows.find(n=>n.ssid==='Atitlan').status,/-52 дБм/);
   assert.equal(rows.find(n=>n.ssid==='Work').saved,true);
   assert.match(rows.find(n=>n.ssid==='Work').status,/Не видна/);
   assert.match(page.elements['wifi-list'].children[1].children[0].textContent,/✓ Work/);
@@ -170,7 +170,7 @@ test('duplicate access points collapse to strongest signal without rendering SSI
   const ssid='<img src=x onerror=alert(1)>';
   const {context,elements}=await openSetupPage({}, {ok:true,networks:[{ssid,rssi:-80},{ssid,rssi:-30}]});
   assert.equal(context.wifiRows().length,1);
-  assert.match(context.wifiRows()[0].status,/-30 dBm/);
+  assert.match(context.wifiRows()[0].status,/-30 дБм/);
   assert.equal(elements['wifi-list'].children[0].children[0].textContent,ssid);
 });
 test('delete and add preserve other slot credentials and do not claim pending data is saved',async()=>{
@@ -206,7 +206,7 @@ test('saved network reappearing after a scan clears the not-visible indication',
   const page=await openSetupPage({wifi_networks:[{ssid:'Work',password_set:true}]});
   assert.match(page.context.wifiRows()[0].status,/Не видна/);
   page.scan.networks.push({ssid:'Work',rssi:-48});await page.context.scanWifi(true);
-  assert.match(page.context.wifiRows()[0].status,/-48 dBm/);assert.equal(page.context.wifiRows()[0].saved,true);
+  assert.match(page.context.wifiRows()[0].status,/-48 дБм/);assert.equal(page.context.wifiRows()[0].saved,true);
 });
 
 test('reset cancellation never sends a request', async()=>{

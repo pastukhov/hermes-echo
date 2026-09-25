@@ -6,8 +6,10 @@
 #include "screen_font.h"
 #include "voice_config_httpd.h"
 #include "voice_wifi_setup.h"
+#include "voice_wireguard.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -58,6 +60,7 @@ static state_t s_screen_state = (state_t)-1;
 static int s_screen_phase = -1;
 static screen_processing_phase_t s_screen_processing_phase = SCREEN_PROCESSING_THINKING;
 static bool s_screen_wifi;
+static const char *s_screen_wg;
 static bool s_screen_timing_reported;
 static char s_screen_device_id[16];
 static bool wifi_init_once(bool need_sta, bool need_ap);
@@ -415,9 +418,27 @@ static void screen_hint(const char *hint) {
 
 static void screen_wifi_icon(bool connected) {
   uint16_t color = connected ? 0x38B8 : C_MUTED;
-  screen_rect(111, 21, 3, 3, color);
-  screen_rect(117, 16, 3, 8, color);
-  screen_rect(123, 11, 3, 13, color);
+  // Two circular arcs and a dot: connection status, not signal strength.
+  for (int y = -12; y <= -3; ++y) {
+    for (int x = -12; x <= 12; ++x) {
+      int r2 = x * x + y * y;
+      if (y <= -abs(x) && ((r2 >= 100 && r2 <= 144) ||
+                           (r2 >= 25 && r2 <= 49)))
+        screen_pixel(87 + x, 24 + y, color);
+    }
+  }
+  screen_circle(87, 23, 1, color);
+}
+
+static void screen_wireguard_icon(const char *status, int phase) {
+  uint16_t color = C_MUTED;
+  if (strcmp(status, "connected") == 0) color = 0x07E0;
+  else if (strcmp(status, "error") == 0 || strcmp(status, "subnet_conflict") == 0)
+    color = 0xF800;
+  else if (strcmp(status, "disabled") != 0)
+    color = (phase / 3) % 2 ? 0xFD20 : C_MUTED;
+  screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 114, 13,
+                            SCREEN_FONT_SMALL, "WG", color);
 }
 
 static void screen_draw_icon(screen_ui_view_t view, int phase) {
@@ -487,9 +508,10 @@ void board_sticks3_display_set_device_id(const char *device_id) {
 void board_sticks3_display_update(state_t state, uint32_t now_ms,
                                  screen_processing_phase_t processing_phase) {
   int phase = (int)(now_ms / 180U);
+  const char *wg_status = voice_wireguard_status();
   if (state == s_screen_state && phase == s_screen_phase &&
       processing_phase == s_screen_processing_phase &&
-      s_wifi_connected == s_screen_wifi) return;
+      s_wifi_connected == s_screen_wifi && wg_status == s_screen_wg) return;
   if (!s_screen) s_screen = heap_caps_malloc(SCREEN_W * SCREEN_H * sizeof(*s_screen), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!s_screen) s_screen = heap_caps_malloc(SCREEN_W * SCREEN_H * sizeof(*s_screen), MALLOC_CAP_8BIT);
   if (!s_screen) return;
@@ -499,6 +521,7 @@ void board_sticks3_display_update(state_t state, uint32_t now_ms,
   screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 42, 13,
                             SCREEN_FONT_SMALL, "ГЕРМЕС", C_WHITE);
   screen_wifi_icon(s_wifi_connected);
+  screen_wireguard_icon(wg_status, phase);
   screen_rect(10, 32, 115, 1, C_LINE);
   screen_draw_icon(view, phase);
   screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 67, 155,
@@ -519,6 +542,7 @@ void board_sticks3_display_update(state_t state, uint32_t now_ms,
   s_screen_phase = phase;
   s_screen_processing_phase = processing_phase;
   s_screen_wifi = s_wifi_connected;
+  s_screen_wg = wg_status;
 }
 
 void board_sticks3_log_memory(void) {

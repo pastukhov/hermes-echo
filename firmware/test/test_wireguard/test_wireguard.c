@@ -94,8 +94,46 @@ static void test_setup_ap_blocks_vpn_even_with_station_connected(void) {
   TEST_ASSERT_TRUE(voice_wireguard_should_connect(true, true, false));
 }
 
+
+static void test_hidden_fields_preserve_saved_values(void) {
+  TEST_ASSERT_TRUE(form("gateway_url=&wg_address=&wg_netmask=&wg_endpoint=&wg_public_key=&wg_ntp_server=&wg_port=&wg_keepalive="));
+  TEST_ASSERT_EQUAL_STRING("http://10.7.0.1:8080", settings.gateway_url);
+  TEST_ASSERT_EQUAL_STRING("10.7.0.2", settings.wireguard.address);
+  TEST_ASSERT_EQUAL_STRING("vpn.example.com", settings.wireguard.endpoint);
+  TEST_ASSERT_EQUAL_STRING(key, settings.wireguard.public_key);
+  TEST_ASSERT_EQUAL_UINT16(51820, settings.wireguard.port);
+  TEST_ASSERT_EQUAL_UINT16(25, settings.wireguard.keepalive);
+}
+
+static void test_cannot_redirect_a_saved_token_to_another_server(void) {
+  TEST_ASSERT_FALSE(form("gateway_url=http%3A%2F%2Fevil.test"));
+  setUp();
+  TEST_ASSERT_TRUE(form("gateway_url=http%3A%2F%2Fnew.test&device_token=new-token"));
+  TEST_ASSERT_EQUAL_STRING("new-token", settings.device_token);
+}
+
+
+static void test_public_status_contains_presence_flags_only(void) {
+  char json[1536];
+  strcpy(settings.wireguard.preshared_key, key);
+  TEST_ASSERT_TRUE(voice_config_public_status(&settings, json, sizeof(json)));
+  const char *private_values[] = {settings.device_token, settings.gateway_url,
+      settings.wireguard.address, settings.wireguard.endpoint, key,
+      settings.wireguard.netmask, settings.wireguard.ntp_server};
+  for (unsigned i = 0; i < sizeof(private_values) / sizeof(private_values[0]); ++i)
+    TEST_ASSERT_NULL(strstr(json, private_values[i]));
+  TEST_ASSERT_NOT_NULL(strstr(json, "\"gateway_url_set\":true"));
+  TEST_ASSERT_NOT_NULL(strstr(json, "\"wg_private_key_set\":true"));
+  TEST_ASSERT_NOT_NULL(strstr(json, "\"wg_port_set\":true"));
+  TEST_ASSERT_NULL(strstr(json, "\"wg_port\":"));
+  TEST_ASSERT_FALSE(voice_config_public_status(&settings, json, 8));
+}
+
 int main(void) {
   UNITY_BEGIN();
+  RUN_TEST(test_public_status_contains_presence_flags_only);
+  RUN_TEST(test_hidden_fields_preserve_saved_values);
+  RUN_TEST(test_cannot_redirect_a_saved_token_to_another_server);
   RUN_TEST(test_setup_ap_blocks_vpn_even_with_station_connected);
   RUN_TEST(test_defaults_and_valid_configuration);
   RUN_TEST(test_bad_keys_and_addresses_are_rejected);

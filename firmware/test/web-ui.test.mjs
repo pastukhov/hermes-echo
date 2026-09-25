@@ -15,6 +15,8 @@ class Element {
   value = ''; textContent = ''; checked = false; hidden = false; children = [];
   replaceChildren(...children) { this.children = children; }
   append(...children) { this.children.push(...children); }
+  setAttribute(name,value) { this[name]=value; }
+  focus() { this.focused=true; }
 }
 async function openSetupPage(config = {}, scan = {ok:true, networks:[{ssid:'Atitlan',rssi:-52}]}) {
   const elements = Object.fromEntries([...html.matchAll(/id='([^']+)'/g)].map(m=>[m[1],new Element()]));
@@ -64,7 +66,7 @@ test('save explains missing gateway without posting secrets',async()=>{
   assert.equal(page.requested.some(r=>r.options?.method==='POST'),false);
 });
 test('setup saves without an editable device ID',async()=>{
-  const page=await openSetupPage({gateway_url:'http://gateway.test'});addOpenNetwork(page);
+  const page=await openSetupPage({gateway_url_set:true});addOpenNetwork(page);
   await page.context.saveCfg();
   const post=page.requested.find(r=>r.options?.method==='POST');assert.ok(post);
   assert.equal(post.options.body.has('device_id'),false);
@@ -88,14 +90,15 @@ test('setup submits only with a device token and an origin URL', async () => {
   assert.equal(requested.some(request => request.options?.method === 'POST'), false);
 
   elements.token.value = 'device-token';
+  elements.url.value = 'http://gateway.local:8080/api/v1/voice/turn';
+  await context.saveCfg();
+  assert.match(elements.info.textContent, /базовый адрес/i);
+  elements.url.value = 'http://gateway.local:8080';
   await context.saveCfg();
   const post = requested.find(request => request.options?.method === 'POST');
   assert.ok(post);
   assert.equal(post.options.body.has('protocol_version'), false);
 
-  elements.url.value = 'http://gateway.local:8080/api/v1/voice/turn';
-  await context.saveCfg();
-  assert.match(elements.info.textContent, /базовый адрес/i);
 });
 
 test('sleep timeout loads a saved value and is submitted in seconds', async () => {
@@ -105,6 +108,7 @@ test('sleep timeout loads a saved value and is submitted in seconds', async () =
   elements['wifi-open'].checked = true;
   context.applyWifi();
   elements.url.value = 'http://gateway.local';
+  elements.token.value = 'new-token';
   elements['sleep-seconds'].value = '45';
   await context.saveCfg();
   assert.equal(requested.find(r => r.options?.method === 'POST').options.body.get('sleep_timeout_seconds'), '45');
@@ -116,6 +120,7 @@ test('sleep timeout defaults to 30 and rejects invalid values without posting', 
   elements['wifi-open'].checked = true;
   context.applyWifi();
   elements.url.value = 'http://gateway.local';
+  elements.token.value = 'new-token';
   for (const value of ['', '0', '4', '3601', '30s', '1.5', '-30']) {
     elements['sleep-seconds'].value = value;
     await context.saveCfg();
@@ -124,7 +129,7 @@ test('sleep timeout defaults to 30 and rejects invalid values without posting', 
   assert.equal(requested.some(r => r.options?.method === 'POST'), false);
 });
 
-test('WireGuard loads public settings without filling secret inputs', async () => {
+test('WireGuard uses saved flags without filling inputs', async () => {
   const { elements, context, requested, intervals } = await openSetupPage({
     wg_enabled: true, wg_address: '10.7.0.2', wg_endpoint: 'vpn.example.com',
     wg_port: 51821, wg_keepalive: 30, wg_private_key_set: true,
@@ -132,7 +137,7 @@ test('WireGuard loads public settings without filling secret inputs', async () =
   });
   assert.equal(elements['wg-enabled'].checked, true);
   assert.equal(elements['wg-full_tunnel'], undefined);
-  assert.equal(elements['wg-port'].value, '51821');
+  assert.equal(elements['wg-port'].value, '');
   assert.equal(elements['wg-private_key'].value, '');
   assert.equal(elements['wg-preshared_key'].value, '');
   assert.match(elements['wg-status'].textContent, /подключён/);
@@ -143,12 +148,13 @@ test('WireGuard loads public settings without filling secret inputs', async () =
   elements['wifi-open'].checked = true;
   context.applyWifi();
   elements.url.value = 'http://10.7.0.1:8080';
+  elements.token.value = 'new-token';
   elements['wg-clear-psk'].checked = true;
   await context.saveCfg();
   const body = requested.find(r => r.options?.method === 'POST').options.body;
   assert.equal(body.get('wg_enabled'), '1');
   assert.equal(body.get('wg_endpoint'), 'edited.example.com');
-  assert.equal(body.get('wg_private_key'), '');
+  assert.equal(body.has('wg_private_key'), false);
   assert.equal(body.get('wg_clear_psk'), '1');
 });
 
@@ -174,7 +180,7 @@ test('duplicate access points collapse to strongest signal without rendering SSI
   assert.equal(elements['wifi-list'].children[0].children[0].textContent,ssid);
 });
 test('delete and add preserve other slot credentials and do not claim pending data is saved',async()=>{
-  const page=await openSetupPage({gateway_url:'http://gateway.test',wifi_networks:[
+  const page=await openSetupPage({gateway_url_set:true,wifi_networks:[
     {ssid:'Home',password_set:true},{ssid:'Work',password_set:true},{ssid:'Cottage',password_set:true}]});
   page.context.editWifi('Work');assert.equal(page.elements.pass.value,'');page.context.removeWifi();
   page.context.editWifi('Phone');page.elements.pass.value='phone-password';assert.equal(page.context.applyWifi(),true);
@@ -184,7 +190,7 @@ test('delete and add preserve other slot credentials and do not claim pending da
   assert.equal(body.get('wifi2_ssid'),'Cottage');assert.equal(body.get('wifi2_password'),'');
 });
 test('saved network keeps blank password, rename requires a new one, cancel discards edits',async()=>{
-  const page=await openSetupPage({gateway_url:'http://gateway.test',wifi_networks:[{ssid:'Home',password_set:true}]});
+  const page=await openSetupPage({gateway_url_set:true,wifi_networks:[{ssid:'Home',password_set:true}]});
   page.context.editWifi('Home');assert.equal(page.elements.pass.value,'');assert.equal(page.context.applyWifi(),true);
   page.context.editWifi('Home');page.elements.ssid.value='NewHome';assert.equal(page.context.applyWifi(),false);
   assert.match(page.elements['wifi-error'].textContent,/пароль/);page.context.closeWifi();
@@ -192,7 +198,7 @@ test('saved network keeps blank password, rename requires a new one, cancel disc
   await page.context.saveCfg();assert.equal(page.requested.find(r=>r.options?.method==='POST').options.body.get('wifi0_password'),'');
 });
 test('full list, duplicate names, and no remaining networks are explained',async()=>{
-  const page=await openSetupPage({gateway_url:'http://gateway.test',wifi_networks:
+  const page=await openSetupPage({gateway_url_set:true,wifi_networks:
     Array.from({length:5},(_,i)=>({ssid:'Net'+i,password_set:true}))});
   page.context.editWifi('Extra');page.elements.pass.value='valid-password';assert.equal(page.context.applyWifi(),false);
   assert.match(page.elements['wifi-error'].textContent,/5 сетей/);
@@ -236,4 +242,44 @@ test('failed reset can be retried only with another confirmation', async()=>{
     assert.match(page.elements['reset-status'].textContent,/Не удалось/);
     await page.context.resetCfg();assert.equal(confirmations,2);
   }
+});
+
+test('three tabs switch panels without discarding edits', async()=>{
+  const page=await openSetupPage();
+  assert.match(html, /role='tablist'/);
+  for(const name of ['wifi','server','vpn']) assert.ok(page.elements['tab-'+name]);
+  page.elements.url.value='http://edited.test';
+  page.context.selectTab('vpn');
+  assert.equal(page.elements['panel-wifi'].hidden,true);
+  assert.equal(page.elements['panel-server'].hidden,true);
+  assert.equal(page.elements['panel-vpn'].hidden,false);
+  page.context.selectTab('server');
+  assert.equal(page.elements.url.value,'http://edited.test');
+});
+
+test('saved server and VPN values never populate inputs even from a legacy response',async()=>{
+  const page=await openSetupPage({gateway_url_set:true,gateway_url:'http://private.test',
+    wg_address:'10.7.0.2',wg_endpoint:'secret.test',wg_port:51821,wg_keepalive:44,
+    wg_public_key:'secret-key',wg_ntp_server:'private-ntp.test'});
+  for(const id of ['url','token','wg-address','wg-netmask','wg-endpoint','wg-port',
+                    'wg-keepalive','wg-public_key','wg-private_key','wg-preshared_key','wg-ntp_server'])
+    assert.equal(page.elements[id].value,'',id);
+});
+
+test('unchanged hidden settings can be saved without resending them',async()=>{
+  const page=await openSetupPage({gateway_url_set:true,wifi_networks:[{ssid:'Home',password_set:true}]});
+  await page.context.saveCfg();
+  const post=page.requested.find(r=>r.options?.method==='POST');
+  assert.ok(post);
+  for(const key of ['gateway_url','wg_address','wg_netmask','wg_endpoint','wg_port','wg_public_key','wg_keepalive','wg_ntp_server'])
+    assert.equal(post.options.body.has(key),false,key);
+  assert.equal(post.options.headers['X-Hermes-Setup'],'1');
+});
+
+test('changing server requires entering a token instead of reusing the stored one',async()=>{
+  const page=await openSetupPage({gateway_url_set:true,wifi_networks:[{ssid:'Home',password_set:true}]});
+  page.elements.url.value='http://another.test';
+  await page.context.saveCfg();
+  assert.equal(page.requested.some(r=>r.options?.method==='POST'),false);
+  assert.match(page.elements.info.textContent,/токен/i);
 });

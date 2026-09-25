@@ -3,6 +3,8 @@
 
 #include "voice_settings.h"
 
+bool voice_config_public_status(const voice_settings_t *settings, char *out, size_t capacity);
+
 bool voice_config_parse_form(char *body, voice_settings_t *next);
 
 void voice_config_httpd_start(voice_settings_t *settings);

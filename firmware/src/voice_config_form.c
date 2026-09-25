@@ -32,7 +32,9 @@ static bool update_form_field(char *dst, size_t cap, const char *value) {
 
 bool voice_config_parse_form(char *body, voice_settings_t *next) {
   if (!body || !next) return false;
-  bool clear_psk = false;
+  bool clear_psk = false, token_given = false;
+  char old_gateway[sizeof(next->gateway_url)];
+  memcpy(old_gateway, next->gateway_url, sizeof(old_gateway));
   char old_ssids[VOICE_WIFI_PROFILE_COUNT][33];
   bool password_given[VOICE_WIFI_PROFILE_COUNT] = {0};
   bool open_network[VOICE_WIFI_PROFILE_COUNT] = {0};
@@ -83,10 +85,10 @@ bool voice_config_parse_form(char *body, voice_settings_t *next) {
         else clear_psk = value[0] == '1';
       }
       else if (strcmp(key, "wg_port") == 0) {
-        if (!voice_wireguard_parse_u16(value, &next->wireguard.port)) return false;
+        if (value[0] && !voice_wireguard_parse_u16(value, &next->wireguard.port)) return false;
       }
       else if (strcmp(key, "wg_keepalive") == 0) {
-        if (!voice_wireguard_parse_u16(value, &next->wireguard.keepalive)) return false;
+        if (value[0] && !voice_wireguard_parse_u16(value, &next->wireguard.keepalive)) return false;
       }
       else if (strcmp(key, "wg_address") == 0) { dst = next->wireguard.address; cap = sizeof(next->wireguard.address); }
       else if (strcmp(key, "wg_netmask") == 0) { dst = next->wireguard.netmask; cap = sizeof(next->wireguard.netmask); }
@@ -95,10 +97,9 @@ bool voice_config_parse_form(char *body, voice_settings_t *next) {
       else if (strcmp(key, "wg_private_key") == 0) { dst = next->wireguard.private_key; cap = sizeof(next->wireguard.private_key); }
       else if (strcmp(key, "wg_preshared_key") == 0) { dst = next->wireguard.preshared_key; cap = sizeof(next->wireguard.preshared_key); }
       else if (strcmp(key, "wg_ntp_server") == 0) { dst = next->wireguard.ntp_server; cap = sizeof(next->wireguard.ntp_server); }
-      /* Empty secret fields mean "keep the saved secret" in this UI. */
-      bool secret = strcmp(key, "wifi_password") == 0 || strcmp(key, "device_token") == 0 ||
-        strcmp(key, "wg_private_key") == 0 || strcmp(key, "wg_preshared_key") == 0;
-      if (dst && !(secret && !value[0]) && !update_form_field(dst, cap, value)) return false;
+      // All server/VPN text inputs are write-only: empty means unchanged.
+      if (strcmp(key, "device_token") == 0 && value[0]) token_given = true;
+      if (dst && value[0] && !update_form_field(dst, cap, value)) return false;
     }
     cursor = *pair_end ? pair_end + 1 : pair_end;
   }
@@ -106,6 +107,8 @@ bool voice_config_parse_form(char *body, voice_settings_t *next) {
     if (!next->wifi[i].ssid[0] || open_network[i]) next->wifi[i].password[0] = '\0';
     else if (strcmp(old_ssids[i], next->wifi[i].ssid) != 0 && !password_given[i]) return false;
   }
+  // Do not let an unauthenticated destination edit forward a saved bearer token.
+  if (strcmp(old_gateway, next->gateway_url) != 0 && !token_given) return false;
   if (clear_psk) next->wireguard.preshared_key[0] = '\0';
   return voice_settings_valid(next);
 }

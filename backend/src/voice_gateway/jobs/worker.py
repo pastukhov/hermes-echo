@@ -92,7 +92,10 @@ class VoiceJobWorker:
                 except asyncio.CancelledError:
                     self._archive_failure(job, "interrupted")
                     self.store.finish(turn_id, "interrupted", error_code="interrupted")
-                    raise
+                    # Cancelling a child turn must not retire the queue consumer.
+                    # Propagate only cancellation of the worker itself (shutdown).
+                    if asyncio.current_task().cancelling():
+                        raise
                 except Exception as exc:
                     code = getattr(exc, "code", "agent_unavailable")
                     self._archive_failure(job, code)

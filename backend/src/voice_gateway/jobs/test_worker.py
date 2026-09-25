@@ -103,3 +103,45 @@ def test_worker_does_not_replay_running_job_after_restart(tmp_path):
         await worker.close()
 
     asyncio.run(scenario())
+
+
+def test_cancelling_one_turn_keeps_worker_alive_for_next_turn(tmp_path):
+    async def scenario():
+        store = VoiceJobStore(tmp_path / 'jobs.sqlite', tmp_path / 'archive')
+        store.initialize()
+        def upload():
+            _, row = store.claim_upload('mic', str(uuid.uuid4()))
+            part = Path(row['upload_path'])
+            part.write_bytes(b'\0\0' * 40)
+            size, digest = store.hash_file(part)
+            return store.complete_upload('mic', row['request_id'], stage_path=part, size=size, digest=digest)
+        first = upload()
+        started = asyncio.Event()
+        processed = asyncio.Event()
+        async def process(job, progress):
+            if job['turn_id'] == first['turn_id']:
+                started.set()
+                await asyncio.Event().wait()
+            result = Path(job['audio_path']).with_name('reply.wav')
+            with wave.open(str(result), 'wb') as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(24000)
+                wav.writeframes(b'\0\0' * 40)
+            processed.set()
+            return result
+        worker = VoiceJobWorker(store, process)
+        await worker.start()
+        await asyncio.wait_for(started.wait(), 1)
+        store.cancel('mic', first['turn_id'])
+        await worker.cancel(first['turn_id'])
+        second = upload()
+        await worker.enqueue(second['turn_id'])
+        try:
+            await asyncio.wait_for(processed.wait(), 1)
+            await asyncio.wait_for(worker.queue.join(), 1)
+            assert store.get(second['turn_id'])['status'] == 'ready'
+            assert store.get(first['turn_id'])['status'] == 'cancelled'
+        finally:
+            await worker.close()
+    asyncio.run(scenario())

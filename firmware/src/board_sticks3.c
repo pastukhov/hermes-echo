@@ -436,7 +436,7 @@ static void screen_wireguard_icon(const char *status, int phase) {
   if (strcmp(status, "connected") == 0) color = C_CONNECTED;
   else if (strcmp(status, "error") == 0 || strcmp(status, "subnet_conflict") == 0)
     color = 0xF800;
-  else if (strcmp(status, "disabled") != 0)
+  else if (strcmp(status, "disabled") != 0 && strcmp(status, "paused_setup") != 0)
     color = (phase / 3) % 2 ? 0xFD20 : C_MUTED;
   screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 114, 13,
                             SCREEN_FONT_SMALL, "WG", color);

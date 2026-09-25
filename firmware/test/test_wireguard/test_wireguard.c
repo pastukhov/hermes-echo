@@ -84,8 +84,19 @@ static void test_form_decodes_base64_and_rejects_truncation(void) {
   TEST_ASSERT_FALSE(form("wg_endpoint=host%00evil"));
 }
 
+static void test_setup_ap_blocks_vpn_even_with_station_connected(void) {
+  TEST_ASSERT_TRUE(voice_wireguard_should_connect(true, true, false));
+  TEST_ASSERT_FALSE(voice_wireguard_should_connect(true, true, true));
+  TEST_ASSERT_FALSE(voice_wireguard_should_connect(true, false, true));
+  TEST_ASSERT_FALSE(voice_wireguard_should_connect(true, false, false));
+  TEST_ASSERT_FALSE(voice_wireguard_should_connect(false, true, false));
+  /* Closing the setup AP permits the saved VPN again. */
+  TEST_ASSERT_TRUE(voice_wireguard_should_connect(true, true, false));
+}
+
 int main(void) {
   UNITY_BEGIN();
+  RUN_TEST(test_setup_ap_blocks_vpn_even_with_station_connected);
   RUN_TEST(test_defaults_and_valid_configuration);
   RUN_TEST(test_bad_keys_and_addresses_are_rejected);
   RUN_TEST(test_secret_preservation_and_explicit_psk_removal);

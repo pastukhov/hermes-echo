@@ -1,5 +1,9 @@
 #include "voice_wireguard.h"
 
+bool voice_wireguard_should_connect(bool enabled, bool station_online, bool setup_ap_active) {
+  return enabled && station_online && !setup_ap_active;
+}
+
 #ifdef ESP_PLATFORM
 #include <stdatomic.h>
 #include <stdio.h>
@@ -20,7 +24,7 @@ _Static_assert(WIREGUARD_MAX_SRC_IPS >= 2, "WireGuard needs own-address and VPN-
 #endif
 
 typedef enum { WG_DISABLED, WG_WIFI, WG_TIME, WG_CONNECTING, WG_UP,
-               WG_ERROR, WG_CONFLICT } wg_state_t;
+               WG_ERROR, WG_CONFLICT, WG_SETUP } wg_state_t;
 static atomic_int state = WG_DISABLED;
 static voice_wireguard_settings_t settings;
 static wireguard_config_t config = ESP_WIREGUARD_CONFIG_DEFAULT();
@@ -32,7 +36,7 @@ static const char *TAG = "voice_wireguard";
 
 const char *voice_wireguard_status(void) {
   static const char *names[] = {"disabled", "waiting_wifi", "waiting_time",
-    "connecting", "connected", "error", "subnet_conflict"};
+    "connecting", "connected", "error", "subnet_conflict", "paused_setup"};
   return names[atomic_load(&state)];
 }
 
@@ -45,11 +49,20 @@ struct ifreq *voice_wireguard_interface(void) {
   return settings.enabled ? &interface : NULL;
 }
 
-typedef struct { bool online; esp_netif_ip_info_t ip; } network_t;
+typedef struct { bool online; bool setup_ap; esp_netif_ip_info_t ip; } network_t;
 
 /* Every raw lwIP operation, including status and teardown, runs on tcpip_thread. */
 static void tick(void *arg) {
   network_t *network = arg;
+  if (!voice_wireguard_should_connect(settings.enabled, network->online, network->setup_ap)) {
+    if (connecting || atomic_load(&state) != (network->setup_ap ? WG_SETUP : WG_WIFI)) {
+      if (context.netif) esp_wireguard_disconnect(&context);
+    }
+    connecting = false;
+    previous_ip = 0;
+    atomic_store(&state, network->setup_ap ? WG_SETUP : WG_WIFI);
+    return;
+  }
   uint32_t address, mask;
   voice_wireguard_ipv4(settings.address, &address);
   voice_wireguard_ipv4(settings.netmask, &mask);
@@ -115,6 +128,9 @@ static void worker(void *arg) {
   int previous_state = -1;
   for (;;) {
     network_t network = {0};
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&mode) != ESP_OK) mode = WIFI_MODE_AP;
+    network.setup_ap = mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA;
     wifi_ap_record_t ap;
     esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     network.online = sta && esp_wifi_sta_get_ap_info(&ap) == ESP_OK &&

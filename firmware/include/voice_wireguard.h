@@ -23,6 +23,7 @@ bool voice_wireguard_ipv4(const char *value, uint32_t *result);
 void voice_wireguard_start(const voice_wireguard_settings_t *settings);
 const char *voice_wireguard_status(void);
 bool voice_wireguard_ready(void);
+bool voice_wireguard_should_connect(bool enabled, bool station_online, bool setup_ap_active);
 #ifdef ESP_PLATFORM
 #include "lwip/sockets.h"
 struct ifreq *voice_wireguard_interface(void);

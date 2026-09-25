@@ -24,5 +24,17 @@ class TTSProvider(ABC):
     """
 
     @abstractmethod
-    def synthesize(self, text: str, out_path: Path) -> TTSResult:
-        """Synthesize ``text`` into the WAV file at ``out_path``."""
+    def synthesize(
+        self,
+        text: str,
+        out_path: Path,
+        *,
+        turn_id: str | None = None,
+        device_id: str | None = None,
+    ) -> TTSResult:
+        """Synthesize ``text`` into the WAV file at ``out_path``.
+
+        ``turn_id``/``device_id`` are optional, keyword-only context for
+        structured stage logging (ТЗ §33) — implementations that don't log
+        may ignore them.
+        """

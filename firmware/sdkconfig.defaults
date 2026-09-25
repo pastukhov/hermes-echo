@@ -10,3 +10,8 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # WireGuard crypto runs on the lwIP thread.
 CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=8192
+
+# ESP-IDF 5.5 uses a separate esp_netif client-data slot when PPP is enabled.
+# WireGuard owns netif->state; without this, the DHCP callback miscasts it
+# as esp_netif_t and crashes during netif_add. No PPP interface is started.
+CONFIG_LWIP_PPP_SUPPORT=y

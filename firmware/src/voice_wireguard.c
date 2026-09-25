@@ -9,9 +9,15 @@
 #include "esp_netif_sntp.h"
 #include "esp_wifi.h"
 #include "esp_wireguard.h"
+#include "wireguard-platform.h"
+_Static_assert(WIREGUARD_MAX_SRC_IPS >= 2, "WireGuard needs own-address and VPN-route slots");
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/tcpip.h"
+
+#if !LWIP_ESP_NETIF_DATA
+#error "WireGuard requires separate ESP-NETIF client data; enable CONFIG_LWIP_PPP_SUPPORT"
+#endif
 
 typedef enum { WG_DISABLED, WG_WIFI, WG_TIME, WG_CONNECTING, WG_UP,
                WG_ERROR, WG_CONFLICT } wg_state_t;

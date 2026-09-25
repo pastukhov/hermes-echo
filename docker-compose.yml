@@ -1,7 +1,7 @@
 # docker-compose.yml — Hermes Voice Terminal backend (ТЗ §37 — Backend deployment).
 #
 # From the repo root:
-#     docker compose --env-file /home/artem/.hermes/.env up --build -d backend
+#     docker compose --env-file /home/artem/.hermes/.env --env-file .env up --build -d backend
 #     # Only the explicitly mapped Hermes/OpenAI keys below enter the container.
 #
 # Smoke check (docs/development.md):

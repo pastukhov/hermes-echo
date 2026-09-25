@@ -1,4 +1,5 @@
 #include "voice_config_httpd.h"
+#include "voice_mdns.h"
 
 #ifdef ESP_PLATFORM
 #include <stdio.h>
@@ -499,6 +500,7 @@ void voice_config_httpd_start(voice_settings_t *settings) {
   wifi_mode_t mode = WIFI_MODE_NULL;
   if (esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_APSTA)
     voice_config_httpd_setup_ap_started();
+  voice_mdns_start();
   ESP_LOGI(TAG, "settings UI started on port 80");
 }
 #else

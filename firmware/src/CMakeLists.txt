@@ -3,4 +3,4 @@
 
 FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.*)
 
-idf_component_register(SRCS ${app_sources} REQUIRES esp_codec_dev esphome__wireguard)
+idf_component_register(SRCS ${app_sources} REQUIRES espressif__mdns esp_codec_dev esphome__wireguard)

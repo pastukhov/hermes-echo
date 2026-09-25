@@ -27,6 +27,16 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.5.10
+  espressif/mdns:
+    component_hash: e81ca7a7f53ea34e78274df054da692c272e1315572876b237b1748e267c013b
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.11.3
   idf:
     source:
       type: idf
@@ -34,6 +44,7 @@ dependencies:
 direct_dependencies:
 - esphome/wireguard
 - espressif/esp_codec_dev
-manifest_hash: e63030553b0c30f39cb75a8001f3560621379845e5103828816538afa086b6bc
+- espressif/mdns
+manifest_hash: 3276ca2947fcf9fa75bef53804e7545ae3ace3abd403dbff54bd13dbbe835d2f
 target: esp32s3
 version: 2.0.0

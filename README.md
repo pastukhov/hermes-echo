@@ -66,3 +66,18 @@ Compose запускает gateway с `network_mode: host`, поэтому он 
 - Codex provider и протокол v2 включаются явно. По умолчанию firmware использует v1, а gateway — Hermes.
 - Setup AP открыт и предназначен только для локальной настройки.
 - `.env`, Wi-Fi пароли, device tokens и Codex credentials нельзя коммитить.
+
+### Обнаружение диктофона в локальной сети
+
+Диктофон публикует mDNS-имя `hermes-<MAC>.local`, например
+`hermes-7ce8b1e4b780.local`. Имя постоянно, не зависит от выбранной Wi-Fi сети
+и сохраняется после сброса настроек. Устройства можно обнаружить через DNS-SD
+по сервису `_hermes._tcp`; также публикуется `_http._tcp` (порт 80).
+TXT-записи содержат модель `StickS3`, путь `/` и `access=setup-ap-only`.
+
+В Linux с Avahi: `avahi-browse -rt _hermes._tcp` или
+`avahi-resolve-host-name -4 hermes-7ce8b1e4b780.local`.
+Клиент и диктофон должны находиться в одной локальной сети с разрешённым multicast.
+Веб-настройки по-прежнему доступны только при подключении к setup AP диктофона;
+само обнаружение работает и в обычной Wi-Fi сети.
+Используется [компонент mDNS Espressif](https://components.espressif.com/components/espressif/mdns/versions/1.11.3/readme).

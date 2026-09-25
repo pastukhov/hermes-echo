@@ -1,3 +1,4 @@
 dependencies:
   espressif/esp_codec_dev: "1.5.10"
   esphome/wireguard: "0.4.6"
+  espressif/mdns: "1.11.3"

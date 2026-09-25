@@ -126,6 +126,11 @@ void test_idle_waits_for_wifi_and_vpn_before_showing_ready(void) {
 void test_setup_screen_renders_network_and_address_without_clipping(void) {
   static uint16_t pixels[135 * 240];
   TEST_ASSERT_TRUE(screen_ui_draw_setup(pixels, 135, 240, "Hermes-StickS3-Setup-80"));
+  // A full four-module white quiet zone surrounds the QR at three pixels/module.
+  for (int y = 75; y < 186; ++y)
+    for (int x = 12; x < 123; ++x)
+      if (x < 24 || x >= 111 || y < 87 || y >= 174)
+        TEST_ASSERT_EQUAL_HEX16(0xffff, pixels[y * 135 + x]);
   FILE *preview = fopen("/tmp/hermes-setup-screen.ppm", "wb");
   if (preview) {
     fprintf(preview, "P6\n135 240\n255\n");

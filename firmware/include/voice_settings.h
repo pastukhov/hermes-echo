@@ -32,6 +32,8 @@ typedef struct {
 
 esp_err_t voice_settings_load(voice_settings_t *settings);
 esp_err_t voice_settings_save(const voice_settings_t *settings);
+void voice_settings_factory_defaults(voice_settings_t *settings);
+esp_err_t voice_settings_reset(void);
 bool voice_settings_parse_sleep_timeout(const char *value, uint32_t *seconds);
 bool voice_settings_valid(const voice_settings_t *settings);
 void voice_settings_set_device_id_from_mac(voice_settings_t *settings,

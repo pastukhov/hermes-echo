@@ -150,10 +150,15 @@ static const char k_html[] =
   "</div>"
   "</div>"
   "<div class='card'>"
+  "<b>Сброс настроек</b>"
+  "<p class='muted'>Удалить все сети Wi-Fi, пароли, настройки сервера и WireGuard. Таймер сна вернётся к 30 секундам.</p>"
+  "<button id='reset-settings' style='color:#ff8a80' onclick='resetCfg()'>Сбросить все настройки</button>"
+  "<div id='reset-status' class='muted' role='status'></div></div><div class='card'>"
   "<b>Status</b>"
   "<div id='status' class='muted' style='margin-top:6px'>loading…</div>"
   "</div>"
   "<script>const $=x=>document.getElementById(x);let savedToken=false;let savedWifi=[],wifiProfiles=[],visibleWifi=[],scanState='loading',editingWifi=-1,wifiLoaded=false;\n"
+  "let resetPending=false;\nasync function resetCfg(){\n  if(resetPending)return;\n  if(!confirm('Сбросить ВСЕ настройки диктофона?\\n\\nБудут удалены все сети Wi-Fi и пароли, адрес сервера, токен и ключи WireGuard. Таймер сна станет 30 секунд.\\n\\nДиктофон перезагрузится. Подключитесь к Hermes-StickS3-Setup и настройте его заново.'))return;\n  resetPending=true;$('reset-settings').disabled=true;$('reset-status').textContent='Сброс настроек…';\n  try{\n    const r=await fetch('/config/reset',{method:'POST',headers:{'X-Hermes-Reset':'confirm'}});\n    if(!r.ok)throw new Error('reset failed');\n    $('reset-status').textContent='Настройки сброшены. Перезагрузка… Подключитесь к сети Hermes-StickS3-Setup для настройки.';\n  }catch(e){\n    resetPending=false;$('reset-settings').disabled=false;\n    $('reset-status').textContent='Не удалось подтвердить сброс. Проверьте подключение к диктофону и повторите попытку.';\n  }\n}\n"
   "function wifiRows(){\n"
   "  const visible=new Map();\n"
   "  for(const n of visibleWifi){if(n.ssid&&(!visible.has(n.ssid)||n.rssi>visible.get(n.ssid).rssi))visible.set(n.ssid,n);}\n"
@@ -358,6 +363,27 @@ static esp_err_t h_config_post(httpd_req_t *req) {
   return ESP_OK;
 }
 
+static esp_err_t h_config_reset(httpd_req_t *req) {
+  if (!allow_setup_client(req)) return ESP_OK;
+  char confirmation[8];
+  // A custom header also prevents cross-origin form submissions from resetting.
+  if (req->content_len != 0 ||
+      httpd_req_get_hdr_value_str(req, "X-Hermes-Reset", confirmation, sizeof(confirmation)) != ESP_OK ||
+      strcmp(confirmation, "confirm") != 0) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    return send_json(req, "{\"ok\":false,\"error\":\"confirmation required\"}");
+  }
+  if (voice_settings_reset() != ESP_OK) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    return send_json(req, "{\"ok\":false,\"error\":\"reset failed\"}");
+  }
+  httpd_resp_set_status(req, "202 Accepted");
+  send_json(req, "{\"ok\":true,\"restarting\":true}");
+  vTaskDelay(pdMS_TO_TICKS(250));
+  esp_restart();
+  return ESP_OK;
+}
+
 static esp_err_t h_wifi_scan(httpd_req_t *req) {
   if (!allow_setup_client(req)) return ESP_OK;
   if (strstr(req->uri, "refresh=1")) voice_config_httpd_setup_ap_started();
@@ -465,6 +491,8 @@ void voice_config_httpd_start(voice_settings_t *settings) {
   static const httpd_uri_t get_cfg = {.uri = "/config", .method = HTTP_GET, .handler = h_config_get};
   static const httpd_uri_t post_cfg = {.uri = "/config", .method = HTTP_POST, .handler = h_config_post};
   static const httpd_uri_t scan = {.uri = "/wifi_scan", .method = HTTP_GET, .handler = h_wifi_scan};
+  static const httpd_uri_t reset_cfg = {.uri = "/config/reset", .method = HTTP_POST, .handler = h_config_reset};
+  httpd_register_uri_handler(s_server, &reset_cfg);
   httpd_register_uri_handler(s_server, &root); httpd_register_uri_handler(s_server, &get_cfg);
   httpd_register_uri_handler(s_server, &post_cfg); httpd_register_uri_handler(s_server, &scan);
   httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, h_portal_redirect);

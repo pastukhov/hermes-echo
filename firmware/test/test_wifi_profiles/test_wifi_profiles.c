@@ -96,8 +96,35 @@ static void test_search_gets_time_before_battery_sleep(void) {
   TEST_ASSERT_FALSE(voice_wifi_search_grace(true, 100, 101));
   TEST_ASSERT_TRUE(voice_wifi_search_grace(false, UINT32_MAX - 100, 100));
 }
+static void test_factory_reset_clears_all_credentials_and_restores_defaults(void) {
+  memset(&settings, 'x', sizeof(settings));
+  voice_settings_factory_defaults(&settings);
+  for (size_t i = 0; i < VOICE_WIFI_PROFILE_COUNT; ++i) {
+    TEST_ASSERT_EQUAL_STRING("", settings.wifi[i].ssid);
+    TEST_ASSERT_EQUAL_STRING("", settings.wifi[i].password);
+  }
+  TEST_ASSERT_EQUAL_STRING("", settings.gateway_url);
+  TEST_ASSERT_EQUAL_STRING("", settings.device_id);
+  TEST_ASSERT_EQUAL_STRING("", settings.device_token);
+  TEST_ASSERT_EQUAL_STRING("", settings.request_id);
+  TEST_ASSERT_EQUAL_STRING("", settings.turn_id);
+  TEST_ASSERT_EQUAL_STRING("", settings.wireguard.private_key);
+  TEST_ASSERT_EQUAL_STRING("", settings.wireguard.public_key);
+  TEST_ASSERT_EQUAL_STRING("", settings.wireguard.preshared_key);
+  TEST_ASSERT_EQUAL_STRING("", settings.wireguard.endpoint);
+  TEST_ASSERT_EQUAL_STRING("", settings.wireguard.address);
+  TEST_ASSERT_FALSE(settings.wireguard.enabled);
+  TEST_ASSERT_FALSE(settings.wireguard.full_tunnel);
+  TEST_ASSERT_EQUAL(51820, settings.wireguard.port);
+  TEST_ASSERT_EQUAL(25, settings.wireguard.keepalive);
+  TEST_ASSERT_EQUAL(30, settings.sleep_timeout_seconds);
+  TEST_ASSERT_EQUAL(1, settings.protocol_version);
+  TEST_ASSERT_EQUAL(-1, voice_wifi_first_profile(settings.wifi));
+  TEST_ASSERT_FALSE(voice_settings_valid(&settings));
+}
 int main(void) {
   UNITY_BEGIN();
+  RUN_TEST(test_factory_reset_clears_all_credentials_and_restores_defaults);
   RUN_TEST(test_rotation_skips_empty_slots_and_bounds_attempts);
   RUN_TEST(test_connected_network_is_sticky_then_retried_before_rotation);
   RUN_TEST(test_wraparound_and_no_profiles);

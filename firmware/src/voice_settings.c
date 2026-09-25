@@ -7,6 +7,10 @@
 #ifdef ESP_PLATFORM
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+static SemaphoreHandle_t settings_mutex;
+static bool reset_pending;
 #endif
 
 #ifndef VOICE_WIFI_SSID
@@ -41,6 +45,15 @@ static void defaults(voice_settings_t *s) {
   copy_field(s->wireguard.ntp_server, sizeof(s->wireguard.ntp_server), "pool.ntp.org");
   s->protocol_version = 1;
   s->sleep_timeout_seconds = VOICE_SLEEP_DEFAULT_SECONDS;
+}
+
+void voice_settings_factory_defaults(voice_settings_t *s) {
+  if (!s) return;
+  defaults(s);
+  // Persist explicit empty values so compiled provisioning credentials stay cleared.
+  memset(s->wifi, 0, sizeof(s->wifi));
+  memset(s->gateway_url, 0, sizeof(s->gateway_url));
+  memset(s->device_token, 0, sizeof(s->device_token));
 }
 
 bool voice_settings_parse_sleep_timeout(const char *value, uint32_t *seconds) {
@@ -84,6 +97,8 @@ typedef struct { const char *key; char *value; size_t cap; } field_t;
 
 esp_err_t voice_settings_load(voice_settings_t *s) {
   if (!s) return ESP_ERR_INVALID_ARG;
+  if (!settings_mutex) settings_mutex = xSemaphoreCreateMutex();
+  if (!settings_mutex) return ESP_ERR_NO_MEM;
   defaults(s);
   esp_err_t flash_err = nvs_flash_init();
   if (flash_err == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -143,7 +158,7 @@ esp_err_t voice_settings_load(voice_settings_t *s) {
   return ESP_OK;
 }
 
-esp_err_t voice_settings_save(const voice_settings_t *s) {
+static esp_err_t save_unlocked(const voice_settings_t *s) {
   if (!s) return ESP_ERR_INVALID_ARG;
   nvs_handle_t h;
   esp_err_t err = nvs_open("hermes", NVS_READWRITE, &h);
@@ -184,7 +199,28 @@ esp_err_t voice_settings_save(const voice_settings_t *s) {
   nvs_close(h);
   return err;
 }
+esp_err_t voice_settings_save(const voice_settings_t *s) {
+  if (!s) return ESP_ERR_INVALID_ARG;
+  if (!settings_mutex) return ESP_ERR_INVALID_STATE;
+  xSemaphoreTake(settings_mutex, portMAX_DELAY);
+  esp_err_t err = reset_pending ? ESP_ERR_INVALID_STATE : save_unlocked(s);
+  xSemaphoreGive(settings_mutex);
+  return err;
+}
+
+esp_err_t voice_settings_reset(void) {
+  if (!settings_mutex) return ESP_ERR_INVALID_STATE;
+  voice_settings_t clean;
+  voice_settings_factory_defaults(&clean);
+  xSemaphoreTake(settings_mutex, portMAX_DELAY);
+  esp_err_t err = save_unlocked(&clean);
+  // Block stale worker snapshots from restoring credentials before reboot.
+  if (err == ESP_OK) reset_pending = true;
+  xSemaphoreGive(settings_mutex);
+  return err;
+}
 #else
+esp_err_t voice_settings_reset(void) { return ESP_OK; }
 esp_err_t voice_settings_load(voice_settings_t *s) {
   if (!s) return ESP_ERR_INVALID_ARG;
   defaults(s);

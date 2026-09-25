@@ -208,3 +208,32 @@ test('saved network reappearing after a scan clears the not-visible indication',
   page.scan.networks.push({ssid:'Work',rssi:-48});await page.context.scanWifi(true);
   assert.match(page.context.wifiRows()[0].status,/-48 dBm/);assert.equal(page.context.wifiRows()[0].saved,true);
 });
+
+test('reset cancellation never sends a request', async()=>{
+  const page=await openSetupPage();
+  page.context.confirm=message=>{assert.match(message,/ВСЕ настройки/);return false;};
+  await page.context.resetCfg();
+  assert.equal(page.requested.some(r=>r.path==='/config/reset'),false);
+});
+test('confirmed reset posts once and blocks repeated clicks during restart', async()=>{
+  const page=await openSetupPage();
+  page.context.confirm=()=>true;
+  await Promise.all([page.context.resetCfg(),page.context.resetCfg()]);
+  const resets=page.requested.filter(r=>r.path==='/config/reset');
+  assert.equal(resets.length,1);
+  assert.equal(resets[0].options.method,'POST');
+  assert.equal(resets[0].options.headers['X-Hermes-Reset'],'confirm');
+  assert.equal(page.elements['reset-settings'].disabled,true);
+  assert.match(page.elements['reset-status'].textContent,/Подключитесь/);
+});
+test('failed reset can be retried only with another confirmation', async()=>{
+  for(const networkError of [false,true]){
+    const page=await openSetupPage();let confirmations=0;
+    page.context.confirm=()=>{confirmations++;return true;};
+    page.context.fetch=async()=>{if(networkError)throw Error('offline');return {ok:false};};
+    await page.context.resetCfg();
+    assert.equal(page.elements['reset-settings'].disabled,false);
+    assert.match(page.elements['reset-status'].textContent,/Не удалось/);
+    await page.context.resetCfg();assert.equal(confirmations,2);
+  }
+});

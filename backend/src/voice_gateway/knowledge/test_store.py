@@ -135,3 +135,13 @@ def test_query_and_plan_do_not_change_active_idea(store):
     store.publish(third, 'mic', note(third, 'plan', first, pages=False), context, '')
     assert (store.root / f'builds/{third}.md').exists()
     assert store.context('mic', third, '')['active_idea_id'] == first
+
+
+def test_lint_detects_broken_links_without_reading_raw_as_instructions(store):
+    from backend.src.voice_gateway.knowledge.__main__ import lint
+    source, context, _ = capture(store, text='Текст с [[не ссылка]]')
+    store.publish(source, 'mic', note(source), context, '')
+    assert lint(store.vault) == []
+    with (store.root / 'index.md').open('a') as output:
+        output.write('\n[[Hermes/wiki/concepts/missing]]\n')
+    assert lint(store.vault)[0]['kind'] == 'broken_link'

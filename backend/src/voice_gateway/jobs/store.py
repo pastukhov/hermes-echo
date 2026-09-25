@@ -26,7 +26,7 @@ class VoiceJobStore:
         database: str | Path,
         archive_root: str | Path,
         *,
-        max_bytes: int = 3_840_000,
+        max_bytes: int = 19_200_000,
         max_queue: int = 8,
     ) -> None:
         self.database = Path(database)

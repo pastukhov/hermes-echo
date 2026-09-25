@@ -447,7 +447,7 @@ static void test_ring_buffer_overflow_recovery(void) {
 
 /*
  * Spec section 7: a held button must auto-finish at MAX_RECORD_SECONDS
- * (configurable; 120 s default). The button driver fires
+ * (configurable; 600 s default). The button driver fires
  * MAX_RECORD_TIMEOUT, the RECORDING tick treats it like a release, the
  * microphone stops (M1-03), and the HTTP session is closed gracefully.
  */
@@ -467,7 +467,7 @@ static void test_max_record_seconds_auto_finish(void) {
   tick_to(60);
   MCHECK(app_state() == STATE_IDLE, "IDLE after boot");
 
-  /* Press and HOLD past MAX_RECORD_SECONDS (120 s default). */
+  /* Press and HOLD past MAX_RECORD_SECONDS (600 s default). */
   hw_fake_set_button(&g_hw_fake, true);
   tick_to(200);
   MCHECK(app_state() == STATE_RECORDING, "RECORDING while held");
@@ -481,7 +481,7 @@ static void test_max_record_seconds_auto_finish(void) {
    * stops so a still-held button can't immediately retrigger a new press
    * once IDLE is reached and button_reset() re-arms it. */
   int saw_recording_stop = 0;
-  for (uint32_t t = g_hw_fake.clock_ms + 10; t <= 130000; t += 10) {
+  for (uint32_t t = g_hw_fake.clock_ms + 10; t <= (MAX_RECORD_SECONDS_DEFAULT + 10u) * 1000u; t += 10) {
     hw_fake_set_clock(&g_hw_fake, t);
     app_tick();
     if (g_hw_fake.capture_stop_calls > 0) {

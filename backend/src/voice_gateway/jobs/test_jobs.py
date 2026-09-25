@@ -79,3 +79,18 @@ def test_abandoned_partial_upload_is_recoverable_with_same_request_id(tmp_path):
     claimed_again, retry = jobs.claim_upload("mic-a", request_id)
     assert claimed_again
     assert retry["turn_id"] == first["turn_id"]
+
+
+def test_default_limit_accepts_ten_minutes_and_rejects_extra_sample(tmp_path):
+    jobs = VoiceJobStore(tmp_path / 'jobs.sqlite', tmp_path / 'archive')
+    jobs.initialize()
+    size = 16000 * 2 * 600
+    request_id = str(uuid.uuid4())
+    _, row = jobs.claim_upload('mic', request_id)
+    stage = Path(row['upload_path'])
+    with stage.open('wb') as output:
+        output.truncate(size)
+    with pytest.raises(JobConflict, match='audio_too_large'):
+        jobs.complete_upload('mic', request_id, stage_path=stage, size=size + 2, digest='hash')
+    result = jobs.complete_upload('mic', request_id, stage_path=stage, size=size, digest='hash')
+    assert result['audio_bytes'] == size

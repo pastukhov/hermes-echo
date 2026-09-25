@@ -30,33 +30,33 @@ static SemaphoreHandle_t s_scan_mutex;
 static wifi_ap_record_t s_scan_records[24];
 static char s_scan_body[sizeof(s_scan_json)];
 
-/* The provisioning UI carries Wi-Fi credentials over plain HTTP. Keep it on
- * the device's setup subnet; do not expose it to the station/home LAN. */
+/* Serve setup on the device AP and the currently connected Wi-Fi subnet. */
 static bool allow_setup_client(httpd_req_t *req) {
   struct sockaddr_storage peer = {0};
   socklen_t peer_len = sizeof(peer);
   int fd = httpd_req_to_sockfd(req);
-  esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-  esp_netif_ip_info_t ap_ip = {0};
   bool allowed = false;
-  if (ap) (void)esp_netif_get_ip_info(ap, &ap_ip);
-  if (fd >= 0 && ap_ip.ip.addr && ap_ip.netmask.addr &&
-      getpeername(fd, (struct sockaddr *)&peer, &peer_len) == 0) {
+  if (fd >= 0 && getpeername(fd, (struct sockaddr *)&peer, &peer_len) == 0) {
     const uint8_t *address = NULL;
-    if (peer.ss_family == AF_INET) {
+    if (peer.ss_family == AF_INET)
       address = (const uint8_t *)&((const struct sockaddr_in *)&peer)->sin_addr;
-    } else if (peer.ss_family == AF_INET6) {
+    else if (peer.ss_family == AF_INET6)
       address = ((const struct sockaddr_in6 *)&peer)->sin6_addr.s6_addr;
+    const char *interfaces[] = {"WIFI_AP_DEF", "WIFI_STA_DEF"};
+    for (size_t i = 0; i < 2 && !allowed; ++i) {
+      esp_netif_t *netif = esp_netif_get_handle_from_ifkey(interfaces[i]);
+      esp_netif_ip_info_t ip = {0};
+      if (netif && esp_netif_is_netif_up(netif) &&
+          esp_netif_get_ip_info(netif, &ip) == ESP_OK && ip.ip.addr && ip.netmask.addr)
+        allowed = voice_setup_ipv4_allowed(peer.ss_family, address,
+                                           ntohl(ip.ip.addr), ntohl(ip.netmask.addr));
     }
-    allowed = voice_setup_ipv4_allowed(peer.ss_family, address,
-                                        ntohl(ap_ip.ip.addr), ntohl(ap_ip.netmask.addr));
   }
   if (!allowed) {
     httpd_resp_set_status(req, "403 Forbidden");
-    httpd_resp_send(req, "setup network only", HTTPD_RESP_USE_STRLEN);
-    return false;
+    httpd_resp_send(req, "local Wi-Fi or setup network only", HTTPD_RESP_USE_STRLEN);
   }
-  return true;
+  return allowed;
 }
 
 static const char k_html[] =
@@ -277,10 +277,10 @@ static esp_err_t h_portal_redirect(httpd_req_t *req, httpd_err_code_t error) {
   (void)error;
   if (!allow_setup_client(req)) return ESP_OK;
   httpd_resp_set_status(req, "302 Found");
-  httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+  httpd_resp_set_hdr(req, "Location", "/");
   httpd_resp_set_type(req, "text/html; charset=utf-8");
   return httpd_resp_send(req,
-      "<html><body><a href='http://192.168.4.1/'>Open Hermes StickS3 setup</a></body></html>",
+      "<html><body><a href='/'>Open Hermes StickS3 setup</a></body></html>",
       HTTPD_RESP_USE_STRLEN);
 }
 
@@ -394,6 +394,7 @@ static esp_err_t h_wifi_scan(httpd_req_t *req) {
   strlcpy(body, ready ? s_scan_json :
           "{\"ok\":false,\"scanning\":true,\"networks\":[]}", sizeof(body));
   xSemaphoreGive(s_scan_mutex);
+  if (!ready) voice_config_httpd_setup_ap_started();
   ESP_LOGI(TAG, "wifi scan cache request: ready=%d bytes=%u", (int)ready,
            (unsigned)strlen(body));
   return send_json(req, body);

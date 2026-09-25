@@ -20,7 +20,7 @@ void voice_mdns_start(void) {
     err = mdns_hostname_set(hostname);
     if (err == ESP_OK) err = mdns_instance_name_set(hostname);
     mdns_txt_item_t txt[] = {
-      {"model", "StickS3"}, {"path", "/"}, {"access", "setup-ap-only"},
+      {"model", "StickS3"}, {"path", "/"}, {"access", "local-wifi-and-setup"},
     };
     if (err == ESP_OK)
       err = mdns_service_add(NULL, "_hermes", "_tcp", 80, txt, 3);

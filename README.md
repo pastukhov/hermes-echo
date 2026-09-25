@@ -73,11 +73,14 @@ Compose запускает gateway с `network_mode: host`, поэтому он 
 `hermes-7ce8b1e4b780.local`. Имя постоянно, не зависит от выбранной Wi-Fi сети
 и сохраняется после сброса настроек. Устройства можно обнаружить через DNS-SD
 по сервису `_hermes._tcp`; также публикуется `_http._tcp` (порт 80).
-TXT-записи содержат модель `StickS3`, путь `/` и `access=setup-ap-only`.
+TXT-записи содержат модель `StickS3`, путь `/` и `access=local-wifi-and-setup`.
 
 В Linux с Avahi: `avahi-browse -rt _hermes._tcp` или
 `avahi-resolve-host-name -4 hermes-7ce8b1e4b780.local`.
 Клиент и диктофон должны находиться в одной локальной сети с разрешённым multicast.
-Веб-настройки по-прежнему доступны только при подключении к setup AP диктофона;
-само обнаружение работает и в обычной Wi-Fi сети.
+Полный веб-интерфейс доступен как в setup AP, так и в локальной Wi-Fi сети:
+`http://hermes-7ce8b1e4b780.local/` или по IP диктофона.
+В обоих случаях доступны сканирование сетей, сохранение параметров и сброс
+с подтверждением. Вход без пароля; доступ разрешён из подсети подключённого Wi-Fi
+и собственной setup-сети устройства.
 Используется [компонент mDNS Espressif](https://components.espressif.com/components/espressif/mdns/versions/1.11.3/readme).

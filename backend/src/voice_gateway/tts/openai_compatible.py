@@ -83,7 +83,6 @@ class OpenAICompatibleTTS(TTSProvider):
             "model": self._config.model,
             "voice": self._config.voice,
             "input": text,
-            "response_format": "wav",
         }
         try:
             response = self._client.post(
@@ -133,23 +132,6 @@ class OpenAICompatibleTTS(TTSProvider):
                 error=str(exc),
             )
             raise
-
-        # Streaming TTS responses can leave the RIFF and data sizes as
-        # 0xffffffff. Python's wave reader accepts this, but the StickS3
-        # parser rejects the odd data size before playback. Re-emit the
-        # actual PCM with finite lengths, leaving ordinary WAVs untouched.
-        if body[4:8] == b"\xff" * 4:
-            with wave.open(BytesIO(body), "rb") as source:
-                pcm = source.readframes(len(body) // 2)
-            if len(pcm) % 2:
-                raise TTSProviderError("tts returned an incomplete PCM frame")
-            normalized = BytesIO()
-            with wave.open(normalized, "wb") as target:
-                target.setnchannels(1)
-                target.setsampwidth(2)
-                target.setframerate(sample_rate)
-                target.writeframes(pcm)
-            body = normalized.getvalue()
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(body)

@@ -16,7 +16,6 @@ already gone.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import struct
@@ -32,12 +31,6 @@ from prometheus_client import generate_latest
 from starlette.datastructures import Headers
 
 from backend.common.error_codes import ErrorCode
-from backend.src.voice_gateway.agents.base import AgentClient, AgentClientError, AgentRequest
-from backend.src.voice_gateway.agents.codex_client import CodexAgentClient
-from backend.src.voice_gateway.jobs.api import install_voice_job_routes
-from backend.src.voice_gateway.jobs.auth import parse_device_tokens
-from backend.src.voice_gateway.jobs.store import VoiceJobStore
-from backend.src.voice_gateway.jobs.worker import VoiceJobWorker
 from backend.src.voice_gateway.health import check_live, check_ready
 from backend.src.voice_gateway.archive import (
     MetadataArchiveStore,
@@ -45,14 +38,10 @@ from backend.src.voice_gateway.archive import (
     atomic_write_json,
 )
 from backend.src.voice_gateway.config import (
-    AgentConfig,
-    AgentConfigError,
-    HermesConfig,
-    HermesConfigError,
-    SecurityConfig,
+    DEFAULT_HERMES_MODEL,
     STTConfig,
     STTConfigError,
-    load_hermes_prompt,
+    SecurityConfig,
 )
 from backend.src.voice_gateway.logging_config import (
     configure_logging,
@@ -65,20 +54,14 @@ from backend.src.voice_gateway.middleware import (
     RateLimitMiddleware,
 )
 from backend.src.voice_gateway.hermes.base import HermesClient
-from backend.src.voice_gateway.hermes.client import OpenAICompatibleHermesClient
 from backend.src.voice_gateway.hermes.stage import (
     HermesStage,
     HermesStageError,
     last_raw_response,
 )
 from backend.src.voice_gateway.metrics import init_metrics
-from backend.src.voice_gateway.models.hermes_response import HermesResponse
-from backend.src.voice_gateway.pipeline import VoicePipeline
-from backend.src.voice_gateway.stt.base import STTClientError, STTProvider
+from backend.src.voice_gateway.stt.base import STTProvider
 from backend.src.voice_gateway.stt.client import OpenAICompatibleSTT
-from backend.src.voice_gateway.tts.base import TTSProvider, TTSProviderError
-from backend.src.voice_gateway.tts.config import TTSConfig
-from backend.src.voice_gateway.tts.openai_compatible import OpenAICompatibleTTS
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +72,50 @@ _STREAM_CHUNK = 1024 * 1024
 
 #: ТЗ §24: safe fallback reply spoken/archived when the Hermes stage fails.
 FALLBACK_REPLY = "Не удалось обработать ответ."
+
+
+def _ms(total_seconds: float) -> int:
+    return int(round(total_seconds * 1000))
+
+
+def _default_stt_provider() -> STTProvider | None:
+    """Build the production STTProvider from environment config (ТЗ §20).
+
+    Returns ``None`` when STT is not configured (``STT_BASE_URL`` unset) so
+    the caller can fall back to this milestone's ingest-only contract — the
+    same behavior as before STT was wired in. Only ever consulted when the
+    caller did not explicitly inject a provider (tests always pass one
+    explicitly, so this path only matters for the production singleton).
+    """
+    try:
+        config = STTConfig.from_env()
+    except STTConfigError:
+        return None
+    return OpenAICompatibleSTT(config)
+
+
+def pcm_to_wav(pcm_path: Path, wav_path: Path, sample_rate: int, channels: int) -> None:
+    """Wrap a raw PCM S16LE file in a minimal WAV header.
+
+    Streams in 1 MiB chunks — the full body is never resident in RAM
+    (ТЗ §17.2). The 44-byte header is written with placeholder sizes, the
+    PCM data is copied chunk-wise, then the sizes are patched in place.
+    """
+    pcm_bytes = pcm_path.stat().st_size
+    if pcm_bytes % 2 != 0:
+        raise ValueError("raw PCM S16LE must be an even number of bytes")
+    data_size = pcm_bytes
+    riff_size = 36 + data_size
+    with open(pcm_path, "rb") as src, open(wav_path, "wb") as dst:
+        dst.write(b"RIFF" + struct.pack("<I", riff_size) + b"WAVEfmt ")
+        dst.write(struct.pack("<IHHIIHH", 16, 1, channels, sample_rate,
+                              sample_rate * channels * 2, channels * 2, 16))
+        dst.write(b"data" + struct.pack("<I", data_size))
+        while True:
+            chunk = src.read(_STREAM_CHUNK)
+            if not chunk:
+                break
+            dst.write(chunk)
 
 
 class RequestMetricsMiddleware:
@@ -146,97 +173,26 @@ class RequestMetricsMiddleware:
             self.metrics.request_count_by_route.labels(route=route).inc()
 
 
-
-def _ms(total_seconds: float) -> int:
-    return int(round(total_seconds * 1000))
-
-
-def _default_stt_provider() -> STTProvider | None:
-    """Build the production STTProvider from environment config (ТЗ §20).
-
-    Returns ``None`` when STT is not configured (``STT_BASE_URL`` unset) so
-    the caller can fall back to this milestone's ingest-only contract — the
-    same behavior as before STT was wired in. Only ever consulted when the
-    caller did not explicitly inject a provider (tests always pass one
-    explicitly, so this path only matters for the production singleton).
-    """
-    try:
-        config = STTConfig.from_env()
-    except STTConfigError:
-        return None
-    return OpenAICompatibleSTT(config)
-
-
-def _default_hermes_client() -> HermesClient | None:
-    try:
-        config = HermesConfig.from_env()
-        prompt = load_hermes_prompt()
-    except HermesConfigError:
-        return None
-    return OpenAICompatibleHermesClient(config, system_prompt=prompt)
-
-
-def _default_agent_client() -> AgentClient | None:
-    try:
-        config = AgentConfig.from_env()
-    except AgentConfigError:
-        return None
-    if config.provider == "codex":
-        try:
-            return CodexAgentClient(config.codex_url, config.codex_token)
-        except ValueError:
-            return None
-    return None
-
-
-def _default_tts_provider() -> TTSProvider | None:
-    try:
-        config = TTSConfig.from_env(os.environ)
-    except ValueError:
-        return None
-    return OpenAICompatibleTTS(config)
-
-
-def pcm_to_wav(pcm_path: Path, wav_path: Path, sample_rate: int, channels: int) -> None:
-    """Wrap a raw PCM S16LE file in a minimal WAV header.
-
-    Streams in 1 MiB chunks — the full body is never resident in RAM
-    (ТЗ §17.2). The 44-byte header is written with placeholder sizes, the
-    PCM data is copied chunk-wise, then the sizes are patched in place.
-    """
-    pcm_bytes = pcm_path.stat().st_size
-    if pcm_bytes % 2 != 0:
-        raise ValueError("raw PCM S16LE must be an even number of bytes")
-    data_size = pcm_bytes
-    riff_size = 36 + data_size
-    with open(pcm_path, "rb") as src, open(wav_path, "wb") as dst:
-        dst.write(b"RIFF" + struct.pack("<I", riff_size) + b"WAVEfmt ")
-        dst.write(struct.pack("<IHHIIHH", 16, 1, channels, sample_rate,
-                              sample_rate * channels * 2, channels * 2, 16))
-        dst.write(b"data" + struct.pack("<I", data_size))
-        while True:
-            chunk = src.read(_STREAM_CHUNK)
-            if not chunk:
-                break
-            dst.write(chunk)
-
-
 def create_app(
     archive_root: str | os.PathLike | None = None,
     stt: STTProvider | None = None,
     hermes: HermesClient | None = None,
-    tts: TTSProvider | None = None,
-    agent: AgentClient | None = None,
     security: SecurityConfig | None = None,
 ) -> FastAPI:
     """Build the gateway app.
 
     ``archive_root`` defaults to ``$ARCHIVE_ROOT`` or ``./archive`` (tests
     pass a tmp dir). ``stt`` / ``hermes`` are optional provider
-    dependencies injected by the caller (tests pass fakes explicitly). If
-    a provider is not injected, the app builds it from environment config;
-    unconfigured stages remain disabled. When STT is unavailable the app
-    still boots and a plain audio
+    dependencies injected by the caller (tests pass fakes explicitly). When
+    ``stt`` is left ``None`` the production STTProvider is built from
+    environment config (ТЗ §20, ``_default_stt_provider()``); when neither
+    an env-configured endpoint nor an injected fake is available, STT is
+    simply not run. ``hermes`` has no such env-based default (wiring it in
+    is a separate card's concern) — Hermes only runs when explicitly
+    injected. ``security`` (task t_89295105) defaults to
+    :meth:`SecurityConfig.from_env` when left ``None`` — the production
+    singleton picks up ``VOICE_RATE_LIMIT`` / ``VOICE_RATE_PERIOD`` from
+    the environment; tests inject an explicit config. When STT is unavailable the app still boots and a plain audio
     turn still succeeds with 200 + X-Turn-Id — this milestone's ingest-only
     contract ("backend может ответить простым 200 OK без аудио-тела [без
     STT/Hermes/TTS]") is preserved.
@@ -252,8 +208,9 @@ def create_app(
     # isolated registries and concurrent apps never share counters.
     metrics = init_metrics()
 
-    # All archive access goes through the one ArchiveStore (M2-05): it owns
-    # the turn-directory layout (ТЗ §18) and the atomic metadata.json write.
+    # All archive access goes through the one MetadataArchiveStore (M2-05):
+    # it owns the turn-directory layout (ТЗ §18) and the atomic metadata.json
+    # write.
     store = MetadataArchiveStore(root)
 
     # STT provider: explicit injection wins; otherwise fall back to the
@@ -262,71 +219,14 @@ def create_app(
     # singleton at the bottom of this module.
     stt_provider = stt if stt is not None else _default_stt_provider()
 
-    # Hermes stage: explicit dependencies win; production uses environment
-    # config. The endpoint wraps the client once, per app instance; concurrent
+    # Hermes stage: the single-call policy (ТЗ §21–24) lives here. The
+    # endpoint wraps the injected client once, per app instance; concurrent
     # turns share the stage safely because the raw payload travels through
     # a task-local ContextVar, not an instance attribute.
-    try:
-        agent_config = AgentConfig.from_env()
-        provider = agent_config.provider
-    except AgentConfigError:
-        agent_config = None
-        provider = os.environ.get("VOICE_AGENT_PROVIDER", "hermes").strip().lower()
-    if agent is not None:
-        agent_client = agent
-        hermes_client = None
-        provider = "codex"
-    elif agent_config is not None and agent_config.provider == "codex":
-        agent_client = _default_agent_client()
-        hermes_client = None
-    elif agent_config is not None and agent_config.provider == "hermes":
-        agent_client = None
-        hermes_client = hermes if hermes is not None else _default_hermes_client()
-    else:
-        agent_client = None
-        hermes_client = None
-    tts_provider = tts if tts is not None else _default_tts_provider()
-    hermes_stage = HermesStage(hermes_client) if hermes_client is not None else None
-
-    job_database = os.environ.get("VOICE_JOB_DATABASE", str(root / "voice-jobs.sqlite"))
-    job_store = VoiceJobStore(job_database, root)
-    pipeline = VoicePipeline(stt_provider, agent_client, hermes_stage, tts_provider)
-    job_worker = VoiceJobWorker(job_store, pipeline.run)
-    try:
-        device_tokens = parse_device_tokens(os.environ.get("VOICE_DEVICE_TOKENS"))
-    except ValueError:
-        device_tokens = {}
+    hermes_stage = HermesStage(hermes) if hermes is not None else None
 
     app = FastAPI(title="Hermes Voice Gateway", version="0.2.0")
     app.add_middleware(RequestMetricsMiddleware, metrics=metrics)
-    app.state.stt_provider = stt_provider
-    app.state.hermes_client = hermes_client
-    app.state.agent_client = agent_client
-    app.state.agent_provider = provider
-    app.state.tts_provider = tts_provider
-    app.state.voice_job_store = job_store
-    app.state.voice_job_worker = job_worker
-
-    async def reset_device(device_id: str):
-        if agent_client is None or not hasattr(agent_client, "reset"):
-            raise HTTPException(status_code=503, detail={"error": "agent_reset_unavailable"})
-        await agent_client.reset(device_id)
-
-    install_voice_job_routes(
-        app, job_store, job_worker, device_tokens, reset_device=reset_device
-    )
-
-    @app.on_event("startup")
-    async def start_voice_jobs() -> None:
-        await job_worker.start()
-
-    @app.on_event("shutdown")
-    async def close_agent_client() -> None:
-        await job_worker.close()
-        if agent_client is not None:
-            close = getattr(agent_client, "close", None)
-            if close is not None:
-                await close()
 
     @app.get("/health")
     async def health() -> dict:
@@ -357,13 +257,6 @@ def create_app(
             note_root=os.environ.get("OBSIDIAN_VAULT_PATH"),
             env=os.environ,
         )
-        if provider == "codex" and agent_client is None:
-            payload = report.as_dict()
-            payload["status"] = "not_ready"
-            payload["checks"]["config"] = (
-                "error:CODEX_AGENT_URL or CODEX_AGENT_TOKEN is invalid"
-            )
-            return JSONResponse(status_code=503, content=payload)
         return JSONResponse(
             status_code=200 if report.ready else 503,
             content=report.as_dict(),
@@ -515,7 +408,15 @@ def create_app(
                 error="wav finalization failed",
             )
             raise HTTPException(status_code=500, detail=str(ErrorCode.INTERNAL_ERROR))
-        pcm_path.unlink(missing_ok=True)
+
+        # ТЗ §17.2/17.3: the raw PCM is only forensics for a turn that never
+        # reached a valid WAV (ТЗ §32) -- once input.wav is confirmed good,
+        # keeping input.pcm around too is pure duplication. Best-effort: a
+        # failed unlink here must never fail an otherwise-successful turn.
+        try:
+            pcm_path.unlink()
+        except OSError:
+            pass
 
         # archive stage succeeded (ТЗ §33): WAV finalized, PCM cleaned up.
         log_stage_event(
@@ -546,16 +447,12 @@ def create_app(
             return Response(status_code=200, media_type="audio/wav",
                             headers={"X-Turn-Id": turn_id})
 
-        # --- STT: use the concrete async transport in this ASGI event loop;
-        # injected synchronous providers keep their existing contract. ---
+        # --- STT (sync contract: call directly, no thread pool) -----------
         stt_start = time.perf_counter()
         metrics.active_turns.inc()
         try:
-            if isinstance(stt_provider, OpenAICompatibleSTT):
-                transcript = await stt_provider.transcribe_async(wav_path)
-            else:
-                transcript = await asyncio.to_thread(stt_provider.transcribe, wav_path)
-        except STTClientError as exc:
+            transcript = stt_provider.transcribe(wav_path)
+        except Exception as exc:  # STTClientError + any unexpected STT break
             metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
             metrics.active_turns.dec()
             log_stage_event(
@@ -566,14 +463,6 @@ def create_app(
             )
             return fail_turn(ErrorCode.STT_FAILED.value, str(exc),
                              input_bytes, audio_duration_ms)
-        except Exception:
-            metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
-            metrics.active_turns.dec()
-            save_status(ErrorCode.INTERNAL_ERROR.value, "stt failed",
-                        input_bytes, audio_duration_ms)
-            return JSONResponse(status_code=500,
-                                content={"error": ErrorCode.INTERNAL_ERROR.value,
-                                         "turn_id": turn_id})
         metrics.stt_duration.observe(max(0.0, time.perf_counter() - stt_start))
         metrics.active_turns.dec()
         log_stage_event(
@@ -593,7 +482,7 @@ def create_app(
         atomic_write_bytes(turn_dir / "transcript.txt",
                            transcript.text.encode("utf-8"))
 
-        if hermes_stage is None and agent_client is None and provider == "hermes":
+        if hermes_stage is None:
             # STT ran but Hermes is not wired in for this app instance —
             # wiring Hermes in is a separate card's concern. The turn still
             # succeeds; the transcript is archived in both transcript.txt
@@ -614,43 +503,26 @@ def create_app(
         atomic_write_json(turn_dir / "hermes-request.json",
                           {"turn_id": turn_id, "transcript": transcript.text})
 
+        # Model request metrics (ТЗ §34): the model_name label comes from
+        # the HERMES_MODEL env var with the config default as fallback; the
+        # status label is "success" or the bounded HermesStageError status.
+        model_name = (os.environ.get("HERMES_MODEL", "").strip()
+                      or DEFAULT_HERMES_MODEL)
+
         hermes_start = time.perf_counter()
         metrics.active_turns.inc()
         try:
-            if agent_client is not None:
-                agent_reply = await agent_client.complete(
-                    AgentRequest(turn_id, device_id, transcript.text)
-                )
-                note = agent_reply.note or {
-                    "create": False, "title": "", "content": "", "tags": []
-                }
-                response = HermesResponse.model_validate(
-                    {"reply": agent_reply.reply, "note": note}
-                )
-                raw = json.dumps(
-                    {"reply": response.reply, "note": response.note.model_dump()},
-                    ensure_ascii=False,
-                )
-                last_raw_response.set(raw)
-            elif hermes_stage is not None:
-                response = await hermes_stage.run(transcript.text)
-            else:
-                return fail_turn("agent_unavailable", "Codex agent is not configured",
-                                 input_bytes, audio_duration_ms)
-        except AgentClientError as e:
-            log_stage_event(
-                logger, "hermes", turn_id=turn_id, device_id=device_id,
-                duration_ms=_ms(time.perf_counter() - hermes_start),
-                status=e.code, error=str(e),
-            )
-            return fail_turn(e.code, str(e), input_bytes, audio_duration_ms,
-                             extra={"transcript": transcript.text})
+            response = await hermes_stage.run(transcript.text)
         except HermesStageError as e:
             raw = e.raw  # ORIGINAL text, or None on a transport-level failure
             atomic_write_json(turn_dir / "hermes-response.json",
                               {"raw": raw, "fallback": FALLBACK_REPLY})
             atomic_write_bytes(turn_dir / "reply.txt",
                                FALLBACK_REPLY.encode("utf-8"))
+            metrics.model_request_latency.labels(model_name=model_name).observe(
+                max(0.0, time.perf_counter() - hermes_start))
+            metrics.model_request_count.labels(model_name=model_name,
+                                               status=e.status).inc()
             log_stage_event(
                 logger, "hermes", turn_id=turn_id, device_id=device_id,
                 duration_ms=_ms(time.perf_counter() - hermes_start),
@@ -662,9 +534,10 @@ def create_app(
             metrics.hermes_duration.observe(max(0.0, time.perf_counter() - hermes_start))
             metrics.active_turns.dec()
 
-        # Hermes stage succeeded (ТЗ §33): logged once here regardless of
-        # which of the two branches above (agent_client / hermes_stage) was
-        # taken, so both code paths get the same success-event coverage.
+        metrics.model_request_latency.labels(model_name=model_name).observe(
+            max(0.0, time.perf_counter() - hermes_start))
+        metrics.model_request_count.labels(model_name=model_name,
+                                           status="success").inc()
         log_stage_event(
             logger, "hermes", turn_id=turn_id, device_id=device_id,
             duration_ms=_ms(time.perf_counter() - hermes_start),
@@ -685,38 +558,33 @@ def create_app(
                           {"raw": raw, "reply": response.reply,
                            "note_create": response.note.create})
         atomic_write_bytes(turn_dir / "reply.txt", response.reply.encode("utf-8"))
-        reply_wav_path = turn_dir / "reply.wav"
-        if tts_provider is not None:
-            try:
-                # TTS stage logging (ТЗ §33): OpenAICompatibleTTS.synthesize
-                # already emits a log_stage_event internally when given
-                # turn_id/device_id — pass them through here instead of
-                # adding a second, duplicate log call at this site.
-                tts_provider.synthesize(response.reply, reply_wav_path,
-                                        turn_id=turn_id, device_id=device_id)
-                reply_audio = reply_wav_path.read_bytes()
-            except TTSProviderError as exc:
-                return fail_turn(ErrorCode.TTS_FAILED.value, str(exc),
-                                 input_bytes, audio_duration_ms,
-                                 extra={"transcript": transcript.text,
-                                        "reply": response.reply})
-        else:
-            reply_audio = b""
         save_status("success", None, input_bytes, audio_duration_ms,
                     extra={"transcript": transcript.text, "reply": response.reply})
         metrics.turns_total.labels(status="success").inc()
 
         # ТЗ §12: 200 OK + X-Turn-Id. The WAV *body* arrives in Milestone 6;
         # this milestone answers plain 200 with no audio body (task spec).
-        return Response(content=reply_audio, status_code=200, media_type="audio/wav",
+        return Response(status_code=200, media_type="audio/wav",
                         headers={"X-Turn-Id": turn_id})
 
+    # Per-client / per-route rate limiting (task t_89295105). The middleware
+    # sits outside the route handlers: rejected requests get 429 +
+    # Retry-After before the endpoint runs. The limiter lives on
+    # app.state so handlers and tests can inspect or reset it.
     security = security if security is not None else SecurityConfig.from_env()
     rate_limiter = RateLimiter(security.rate_limit, security.rate_period)
     app.state.rate_limiter = rate_limiter
     app.add_middleware(
-        RateLimitMiddleware, config=security, limiter=rate_limiter
+        RateLimitMiddleware,
+        config=security,
+        limiter=rate_limiter,
     )
+
+    # Device-token auth (task t_ed297906, ТЗ section 40). Added last so it
+    # wraps outermost — auth runs BEFORE rate limiting, publishing the
+    # authenticated device token as the rate limiter's client identity
+    # (see middleware.py's module docstring, point 1 of `_client_id`'s
+    # priority order) instead of falling back to a raw IP.
     app.add_middleware(AuthMiddleware, config=security)
 
     return app

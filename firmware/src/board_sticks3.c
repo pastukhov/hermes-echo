@@ -60,6 +60,7 @@ static state_t s_screen_state = (state_t)-1;
 static int s_screen_phase = -1;
 static screen_processing_phase_t s_screen_processing_phase = SCREEN_PROCESSING_THINKING;
 static bool s_screen_wifi;
+static bool s_screen_setup;
 static const char *s_screen_wg;
 static bool s_screen_timing_reported;
 static char s_screen_device_id[16];
@@ -510,9 +511,13 @@ void board_sticks3_display_update(state_t state, uint32_t now_ms,
                                  screen_processing_phase_t processing_phase) {
   int phase = (int)(now_ms / 180U);
   const char *wg_status = voice_wireguard_status();
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  bool setup = esp_wifi_get_mode(&mode) == ESP_OK &&
+               (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA);
   if (state == s_screen_state && phase == s_screen_phase &&
       processing_phase == s_screen_processing_phase &&
-      s_wifi_connected == s_screen_wifi && wg_status == s_screen_wg) return;
+      s_wifi_connected == s_screen_wifi && wg_status == s_screen_wg &&
+      setup == s_screen_setup) return;
   if (!s_screen) s_screen = heap_caps_malloc(SCREEN_W * SCREEN_H * sizeof(*s_screen), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!s_screen) s_screen = heap_caps_malloc(SCREEN_W * SCREEN_H * sizeof(*s_screen), MALLOC_CAP_8BIT);
   if (!s_screen) return;
@@ -525,10 +530,14 @@ void board_sticks3_display_update(state_t state, uint32_t now_ms,
   screen_wifi_icon(s_wifi_connected);
   screen_wireguard_icon(wg_status, phase);
   screen_rect(10, 32, 115, 1, C_LINE);
-  screen_draw_icon(view, phase);
-  screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 67, 155,
-                            SCREEN_FONT_TITLE, view.title, C_WHITE);
-  screen_hint(view.hint);
+  if (setup && (state == STATE_IDLE || state == STATE_BOOT)) {
+    screen_ui_draw_setup(s_screen, SCREEN_W, SCREEN_H, s_setup_ssid);
+  } else {
+    screen_draw_icon(view, phase);
+    screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 67, 155,
+                              SCREEN_FONT_TITLE, view.title, C_WHITE);
+    screen_hint(view.hint);
+  }
   screen_rect(45, 216, 45, 1, C_LINE);
   screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 67, 222,
                             SCREEN_FONT_SMALL,
@@ -545,6 +554,7 @@ void board_sticks3_display_update(state_t state, uint32_t now_ms,
   s_screen_processing_phase = processing_phase;
   s_screen_wifi = s_wifi_connected;
   s_screen_wg = wg_status;
+  s_screen_setup = setup;
 }
 
 void board_sticks3_log_memory(void) {

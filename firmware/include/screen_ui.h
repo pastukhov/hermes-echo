@@ -26,6 +26,8 @@ typedef struct {
   screen_icon_t icon;
 } screen_ui_view_t;
 
+bool screen_ui_draw_setup(uint16_t *pixels, int width, int height, const char *ssid);
+
 screen_ui_view_t screen_ui_view(state_t state);
 screen_ui_view_t screen_ui_view_with_network(state_t state, screen_processing_phase_t phase,
                                              bool wifi_connected, bool vpn_ready);

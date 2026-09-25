@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <unity.h>
 #include <string.h>
 #include "screen_font.h"
@@ -122,8 +123,26 @@ void test_idle_waits_for_wifi_and_vpn_before_showing_ready(void) {
   TEST_ASSERT_LESS_OR_EQUAL_INT(115, screen_font_measure(SCREEN_FONT_HINT, vpn.hint));
 }
 
+void test_setup_screen_renders_network_and_address_without_clipping(void) {
+  static uint16_t pixels[135 * 240];
+  TEST_ASSERT_TRUE(screen_ui_draw_setup(pixels, 135, 240, "Hermes-StickS3-Setup-80"));
+  FILE *preview = fopen("/tmp/hermes-setup-screen.ppm", "wb");
+  if (preview) {
+    fprintf(preview, "P6\n135 240\n255\n");
+    for (unsigned i = 0; i < 135 * 240; i++) {
+      uint16_t p = pixels[i];
+      unsigned char rgb[] = {(unsigned char)(((p >> 11) & 31) * 255 / 31),
+                             (unsigned char)(((p >> 5) & 63) * 255 / 63),
+                             (unsigned char)((p & 31) * 255 / 31)};
+      fwrite(rgb, 1, 3, preview);
+    }
+    fclose(preview);
+  }
+}
+
 int main(void) {
   UNITY_BEGIN();
+  RUN_TEST(test_setup_screen_renders_network_and_address_without_clipping);
   RUN_TEST(test_idle_waits_for_wifi_and_vpn_before_showing_ready);
   RUN_TEST(test_each_voice_state_has_clear_screen_copy_and_accent);
   RUN_TEST(test_montserrat_draws_cyrillic_letters_distinctly);

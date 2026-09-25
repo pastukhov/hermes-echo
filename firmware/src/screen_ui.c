@@ -1,4 +1,6 @@
 #include "screen_ui.h"
+#include "screen_font.h"
+#include <string.h>
 
 screen_ui_view_t screen_ui_view_with_phase(state_t state,
                                            screen_processing_phase_t phase) {
@@ -37,4 +39,39 @@ screen_ui_view_t screen_ui_view_with_network(state_t state, screen_processing_ph
       return (screen_ui_view_t){"VPN", "ОЖИДАЮ VPN", 0xF5A8, SCREEN_ICON_THINKING};
   }
   return screen_ui_view_with_phase(state, phase);
+}
+
+
+// The generated AP name is ASCII and split at a word boundary to fit the LCD.
+bool screen_ui_draw_setup(uint16_t *pixels, int width, int height, const char *ssid) {
+  if (!pixels || width < 135 || height < 240 || !ssid || strlen(ssid) > 32)
+    return false;
+  char first[33];
+  const char *second = strstr(ssid, "Setup-");
+  size_t length = second ? (size_t)(second - ssid) : strlen(ssid);
+  memcpy(first, ssid, length);
+  first[length] = '\0';
+  if (!second) second = "";
+  const struct {
+    const char *text;
+    int y;
+    screen_font_size_t font;
+    uint16_t color;
+  } lines[] = {
+    {"НАСТРОЙКА", 51, SCREEN_FONT_HINT, 0xF5A8},
+    {"ТОЧКА ДОСТУПА", 76, SCREEN_FONT_SMALL, 0xEF9F},
+    {"Сеть Wi-Fi:", 108, SCREEN_FONT_SMALL, 0x74B3},
+    {first, 126, SCREEN_FONT_SMALL, 0xEF9F},
+    {second, 143, SCREEN_FONT_SMALL, 0xEF9F},
+    {"Адрес в браузере:", 178, SCREEN_FONT_SMALL, 0x74B3},
+    {"192.168.4.1", 195, SCREEN_FONT_HINT, 0xEF9F},
+  };
+  for (unsigned i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i) {
+    int measured = screen_font_measure(lines[i].font, lines[i].text);
+    if (measured < 0 || measured > width - 20 ||
+        !screen_font_draw_centered(pixels, width, height, width / 2, lines[i].y,
+                                   lines[i].font, lines[i].text, lines[i].color))
+      return false;
+  }
+  return true;
 }

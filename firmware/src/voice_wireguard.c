@@ -81,10 +81,10 @@ static void tick(void *arg) {
     err = esp_wireguard_connect(&context);
     if (err == ESP_ERR_RETRY) return;
     if (err == ESP_OK) {
-      err = esp_wireguard_add_allowed_ip(&context,
-          settings.full_tunnel ? "0.0.0.0" : settings.address,
-          settings.full_tunnel ? "0.0.0.0" : settings.netmask);
-      if (err == ESP_OK && settings.full_tunnel)
+      // All IPv4 destinations are allowed, including the gateway's LAN address.
+      // WireGuard's encrypted UDP transport remains bound to the Wi-Fi netif.
+      err = esp_wireguard_add_allowed_ip(&context, "0.0.0.0", "0.0.0.0");
+      if (err == ESP_OK)
         err = esp_wireguard_set_default(&context);
       if (err == ESP_OK) {
         netif_index_to_name(netif_get_index(context.netif), interface.ifr_name);

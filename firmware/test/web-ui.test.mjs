@@ -128,10 +128,10 @@ test('WireGuard loads public settings without filling secret inputs', async () =
   const { elements, context, requested, intervals } = await openSetupPage({
     wg_enabled: true, wg_address: '10.7.0.2', wg_endpoint: 'vpn.example.com',
     wg_port: 51821, wg_keepalive: 30, wg_private_key_set: true,
-    wg_preshared_key_set: true, wg_status: 'connected', wg_full_tunnel: true,
+    wg_preshared_key_set: true, wg_status: 'connected',
   });
   assert.equal(elements['wg-enabled'].checked, true);
-  assert.equal(elements['wg-full_tunnel'].checked, true);
+  assert.equal(elements['wg-full_tunnel'], undefined);
   assert.equal(elements['wg-port'].value, '51821');
   assert.equal(elements['wg-private_key'].value, '');
   assert.equal(elements['wg-preshared_key'].value, '');

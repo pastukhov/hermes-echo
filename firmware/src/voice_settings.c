@@ -148,11 +148,9 @@ esp_err_t voice_settings_load(voice_settings_t *s) {
     size_t len = fields[i].cap;
     (void)nvs_get_str(h, fields[i].key, fields[i].value, &len);
   }
-  uint8_t enabled = 0, full_tunnel = 0;
+  uint8_t enabled = 0;
   (void)nvs_get_u8(h, "wg_enabled", &enabled);
-  (void)nvs_get_u8(h, "wg_full_tunnel", &full_tunnel);
   s->wireguard.enabled = enabled != 0;
-  s->wireguard.full_tunnel = full_tunnel != 0;
   (void)nvs_get_u16(h, "wg_port", &s->wireguard.port);
   (void)nvs_get_u16(h, "wg_keepalive", &s->wireguard.keepalive);
   uint32_t sleep_seconds;
@@ -201,7 +199,10 @@ static esp_err_t save_unlocked(const voice_settings_t *s) {
   }
   if (err == ESP_OK) err = nvs_set_u32(h, "sleep_seconds", s->sleep_timeout_seconds);
   if (err == ESP_OK) err = nvs_set_u8(h, "wg_enabled", s->wireguard.enabled);
-  if (err == ESP_OK) err = nvs_set_u8(h, "wg_full_tunnel", s->wireguard.full_tunnel);
+  if (err == ESP_OK) {
+    esp_err_t obsolete = nvs_erase_key(h, "wg_full_tunnel");
+    if (obsolete != ESP_OK && obsolete != ESP_ERR_NVS_NOT_FOUND) err = obsolete;
+  }
   if (err == ESP_OK) err = nvs_set_u16(h, "wg_port", s->wireguard.port);
   if (err == ESP_OK) err = nvs_set_u16(h, "wg_keepalive", s->wireguard.keepalive);
   if (err == ESP_OK) err = nvs_commit(h);

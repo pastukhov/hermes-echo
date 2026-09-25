@@ -69,8 +69,7 @@ static void test_numeric_limits_and_flags(void) {
   TEST_ASSERT_FALSE(form("wg_port=65536"));
   TEST_ASSERT_FALSE(form("wg_port=-1"));
   TEST_ASSERT_FALSE(form("wg_port=51820xyz"));
-  TEST_ASSERT_TRUE(form("wg_port=65535&wg_keepalive=65535&wg_full_tunnel=1"));
-  TEST_ASSERT_TRUE(settings.wireguard.full_tunnel);
+  TEST_ASSERT_TRUE(form("wg_port=65535&wg_keepalive=65535"));
   TEST_ASSERT_FALSE(form("wg_enabled=true"));
   TEST_ASSERT_FALSE(form("wg_keepalive=99999999999999999999999999"));
   TEST_ASSERT_TRUE(form("wg_enabled=0&wg_private_key=bad"));

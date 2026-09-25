@@ -115,7 +115,6 @@ static void test_factory_reset_clears_all_credentials_and_restores_defaults(void
   TEST_ASSERT_EQUAL_STRING("", settings.wireguard.endpoint);
   TEST_ASSERT_EQUAL_STRING("", settings.wireguard.address);
   TEST_ASSERT_FALSE(settings.wireguard.enabled);
-  TEST_ASSERT_FALSE(settings.wireguard.full_tunnel);
   TEST_ASSERT_EQUAL(51820, settings.wireguard.port);
   TEST_ASSERT_EQUAL(25, settings.wireguard.keepalive);
   TEST_ASSERT_EQUAL(30, settings.sleep_timeout_seconds);

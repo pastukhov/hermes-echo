@@ -76,11 +76,10 @@ bool voice_config_parse_form(char *body, voice_settings_t *next) {
       }
       else if (strcmp(key, "gateway_url") == 0) { dst = next->gateway_url; cap = sizeof(next->gateway_url); }
       else if (strcmp(key, "device_token") == 0) { dst = next->device_token; cap = sizeof(next->device_token); }
-      else if (strcmp(key, "wg_enabled") == 0 || strcmp(key, "wg_full_tunnel") == 0 ||
+      else if (strcmp(key, "wg_enabled") == 0 ||
                strcmp(key, "wg_clear_psk") == 0) {
         if (strcmp(value, "0") != 0 && strcmp(value, "1") != 0) return false;
         if (strcmp(key, "wg_enabled") == 0) next->wireguard.enabled = value[0] == '1';
-        else if (strcmp(key, "wg_full_tunnel") == 0) next->wireguard.full_tunnel = value[0] == '1';
         else clear_psk = value[0] == '1';
       }
       else if (strcmp(key, "wg_port") == 0) {

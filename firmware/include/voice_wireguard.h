@@ -6,7 +6,6 @@
 
 typedef struct {
   bool enabled;
-  bool full_tunnel;
   char address[16];
   char netmask[16];
   char private_key[45];

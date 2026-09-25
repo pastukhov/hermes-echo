@@ -82,6 +82,8 @@ class CodexAgentClient:
             "device_id": request.device_id,
             "transcript": request.transcript,
         }
+        if request.knowledge_context is not None:
+            body["knowledge_context"] = request.knowledge_context
         response = None
         # Re-submit only the identical request ID/body if the 202 was lost.
         for _ in range(2):

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .runtime import RuntimeFailure
+from .knowledge_prompt import knowledge_prompt
 from .store import SQLiteAgentStore, StoreConflict
 
 
@@ -19,6 +20,7 @@ class AgentRequest:
     request_id: str
     device_id: str
     transcript: str
+    knowledge_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +124,10 @@ class AgentService:
             or not request.transcript.strip()
         ):
             raise AgentServiceError("invalid_request", 422)
-        digest = hashlib.sha256(request.transcript.encode("utf-8")).hexdigest()
+        context_json = json.dumps(request.knowledge_context, ensure_ascii=False, sort_keys=True) if request.knowledge_context is not None else None
+        if context_json and len(context_json) > 100000:
+            raise AgentServiceError("invalid_request", 422)
+        digest = hashlib.sha256((request.transcript + ("\0" + context_json if context_json else "")).encode("utf-8")).hexdigest()
         async with self._accept_lock:
             try:
                 row, created = self.store.accept_request(
@@ -131,6 +136,7 @@ class AgentService:
                     digest,
                     request.transcript,
                     self.max_queue,
+                    context_json,
                 )
             except StoreConflict as exc:
                 code = "device_busy" if exc.code == "device_busy" else exc.code
@@ -235,6 +241,8 @@ class AgentService:
                 "Фраза пользователя: "
                 + json.dumps(row["transcript"], ensure_ascii=False)
             )
+            if row.get("context_json"):
+                prompt = knowledge_prompt(row["transcript"], json.loads(row["context_json"]))
             response = await self.runtime.run(thread_id, prompt)
             payload = json.loads(response)
             if not isinstance(payload, dict) or not isinstance(payload.get("reply"), str):
@@ -250,6 +258,9 @@ class AgentService:
                     or not all(isinstance(tag, str) for tag in note.get("tags", []))
                 ):
                     raise RuntimeFailure("agent_invalid_response")
+                knowledge = note.get("knowledge")
+                if knowledge is not None and not isinstance(knowledge, dict):
+                    raise RuntimeFailure("agent_invalid_response")
                 note = {
                     "create": note.get("create", False),
                     "title": str(note.get("title", "")),
@@ -258,6 +269,8 @@ class AgentService:
                     if isinstance(note.get("tags", []), list)
                     else [],
                 }
+                if knowledge is not None:
+                    note["knowledge"] = knowledge
             if not payload["reply"].strip():
                 raise RuntimeFailure("agent_invalid_response")
             reply = AgentReply(

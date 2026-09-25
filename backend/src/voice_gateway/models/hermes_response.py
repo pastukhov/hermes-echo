@@ -15,11 +15,13 @@ The logical JSON contract Hermes must return:
 ``reply`` is always required. ``note`` defaults to "no note" when absent.
 """
 from pydantic import BaseModel, Field
+from backend.src.voice_gateway.knowledge.models import KnowledgeProposal
 
 
 class HermesNote(BaseModel):
     """Optional note request carried in the Hermes structured response."""
 
+    knowledge: KnowledgeProposal | None = None
     create: bool = False
     title: str = ""
     content: str = ""

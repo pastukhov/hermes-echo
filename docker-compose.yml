@@ -24,6 +24,9 @@ services:
   backend:
     # The Hermes API listens on host loopback; bridge networking cannot reach it.
     network_mode: host
+    # Share the vault owner group; archive ownership remains unchanged.
+    group_add:
+      - "${OBSIDIAN_GROUP_ID:-1000}"
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -45,7 +48,7 @@ services:
       # restart instead of landing in the mounted volume. ---
       ARCHIVE_ROOT: /data/archive
       VOICE_JOB_DATABASE: /data/archive/voice-jobs.sqlite
-      VOICE_AGENT_PROVIDER: ${VOICE_AGENT_PROVIDER:-hermes}
+      VOICE_AGENT_PROVIDER: ${VOICE_AGENT_PROVIDER:-codex}
       # The host-side Codex adapter is loopback-bound; host networking lets
       # this existing gateway reach it without exposing Codex credentials.
       CODEX_AGENT_URL: ${CODEX_AGENT_URL:-http://127.0.0.1:8765}
@@ -66,13 +69,14 @@ services:
       TTS_VOICE: ${TTS_VOICE:-alloy}
       # --- Obsidian notes (ТЗ §25–27): in-container vault root, hardcoded to
       # the volume mount target (same rationale as ARCHIVE_PATH). ---
+      VOICE_KNOWLEDGE_ENABLED: ${VOICE_KNOWLEDGE_ENABLED:-true}
       OBSIDIAN_VAULT_PATH: /data/obsidian
       OBSIDIAN_INBOX: ${OBSIDIAN_INBOX:-Voice Inbox}
       NOTE_INCLUDE_TRANSCRIPT: ${NOTE_INCLUDE_TRANSCRIPT:-false}
     volumes:
       # ТЗ §37: host archive -> /data/archive, Obsidian vault -> /data/obsidian.
       - archive_data:/data/archive
-      - obsidian_data:/data/obsidian
+      - ${OBSIDIAN_HOST_PATH:-/home/artem/repos/obsidian}:/data/obsidian
     healthcheck:
       # Лiveness probe on /health/live (ТЗ §35, docs/protocol.md). The
       # python:slim base has no curl, so probe with python's urllib. The port

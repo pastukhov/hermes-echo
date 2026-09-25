@@ -11,6 +11,7 @@ class AgentRequest:
     request_id: str
     device_id: str
     transcript: str
+    knowledge_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -69,3 +69,31 @@ def test_api_conflict_does_not_echo_transcript_or_token(tmp_path) -> None:
         await service.close()
 
     asyncio.run(scenario())
+
+
+def test_knowledge_context_persists_and_conflicts_on_changed_retry(tmp_path):
+    import json
+    class WikiRuntime(FakeRuntime):
+        async def run(self, thread_id, prompt):
+            self.prompt = prompt
+            return json.dumps({'reply': 'готово', 'note': {'create': True, 'title': 'Идея',
+                'content': 'Мысль', 'tags': [], 'knowledge': {'operation': 'capture', 'pages': []}}})
+    async def scenario():
+        runtime = WikiRuntime()
+        service = AgentService(tmp_path / 'agent.sqlite', runtime)
+        await service.start()
+        app = create_app(service, token='test')
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test',
+                                    headers={'Authorization': 'Bearer test'}) as client:
+            body = dict(request_id='wiki1', device_id='mic', transcript='Мысль',
+                        knowledge_context={'source_id': 'a' * 32, 'pages': []})
+            assert (await client.post('/v1/agent/turns', json=body)).status_code == 202
+            result = await service.wait('wiki1')
+            assert result.reply.note['knowledge']['operation'] == 'capture'
+            assert 'редактор личной базы' in runtime.prompt
+            assert 'a' * 32 in runtime.prompt
+            assert service.store.get_request('wiki1')['context_json']
+            body['knowledge_context']['source_id'] = 'b' * 32
+            assert (await client.post('/v1/agent/turns', json=body)).status_code == 409
+        await service.close()
+    asyncio.run(scenario())

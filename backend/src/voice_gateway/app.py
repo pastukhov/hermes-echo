@@ -38,6 +38,7 @@ from backend.src.voice_gateway.hermes.client import OpenAICompatibleHermesClient
 from backend.src.voice_gateway.hermes.stage import HermesStage
 from backend.src.voice_gateway.metrics import init_metrics
 from backend.src.voice_gateway.pipeline import VoicePipeline
+from backend.src.voice_gateway.knowledge.store import KnowledgeStore
 from backend.src.voice_gateway.stt.base import STTProvider
 from backend.src.voice_gateway.stt.client import OpenAICompatibleSTT
 from backend.src.voice_gateway.tts.base import TTSProvider
@@ -206,7 +207,11 @@ def create_app(
 
     job_database = os.environ.get("VOICE_JOB_DATABASE", str(root / "voice-jobs.sqlite"))
     job_store = VoiceJobStore(job_database, root)
-    pipeline = VoicePipeline(stt_provider, agent_client, hermes_stage, tts_provider)
+    vault_path = os.environ.get("OBSIDIAN_VAULT_PATH")
+    knowledge = KnowledgeStore(Path(vault_path), root / "knowledge-state") if vault_path and os.environ.get("VOICE_KNOWLEDGE_ENABLED", "false").lower() == "true" else None
+    if knowledge is not None and agent_client is None:
+        raise ValueError("Knowledge capture currently requires the Codex agent adapter")
+    pipeline = VoicePipeline(stt_provider, agent_client, hermes_stage, tts_provider, knowledge=knowledge)
     job_worker = VoiceJobWorker(job_store, pipeline.run)
     try:
         device_tokens = parse_device_tokens(os.environ.get("VOICE_DEVICE_TOKENS"))

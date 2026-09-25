@@ -20,7 +20,8 @@ class TurnInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
     device_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
-    transcript: str = Field(min_length=1, max_length=8000)
+    transcript: str = Field(min_length=1, max_length=40000)
+    knowledge_context: dict | None = None
 
 
 class ResetInput(BaseModel):
@@ -106,7 +107,7 @@ def create_app(
     async def submit_turn(body: TurnInput):
         try:
             snapshot = await service.submit(
-                AgentRequest(body.request_id, body.device_id, body.transcript)
+                AgentRequest(body.request_id, body.device_id, body.transcript, body.knowledge_context)
             )
         except AgentServiceError as exc:
             raise translate_error(exc) from None

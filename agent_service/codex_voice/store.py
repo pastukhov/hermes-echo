@@ -82,6 +82,9 @@ class SQLiteAgentStore:
                     "ALTER TABLE requests ADD COLUMN transcript TEXT NOT NULL DEFAULT ''"
                 )
 
+            if "context_json" not in columns:
+                connection.execute("ALTER TABLE requests ADD COLUMN context_json TEXT")
+
     def accept_request(
         self,
         request_id: str,
@@ -89,6 +92,7 @@ class SQLiteAgentStore:
         input_hash: str,
         transcript: str,
         queue_limit: int,
+        context_json: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -126,6 +130,8 @@ class SQLiteAgentStore:
                     "VALUES (?, ?, ?, ?, 'queued', ?, ?)",
                     (request_id, device_id, input_hash, transcript, now, now),
                 )
+                connection.execute("UPDATE requests SET context_json=? WHERE request_id=?",
+                                   (context_json, request_id))
                 row = connection.execute(
                     "SELECT * FROM requests WHERE request_id = ?", (request_id,)
                 ).fetchone()

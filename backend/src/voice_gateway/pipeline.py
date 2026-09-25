@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import json
 import wave
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,7 +14,9 @@ from backend.src.voice_gateway.agents.base import AgentClient, AgentRequest
 from backend.src.voice_gateway.archive import atomic_write_bytes, atomic_write_json
 from backend.src.voice_gateway.hermes.stage import HermesStage
 from backend.src.voice_gateway.models.hermes_response import HermesResponse
+from backend.src.voice_gateway.knowledge.store import KnowledgeStore, KnowledgeConflict
 from backend.src.voice_gateway.stt.base import STTClientError, STTProvider
+from backend.src.voice_gateway.models import Transcript
 from backend.src.voice_gateway.stt.client import OpenAICompatibleSTT
 from backend.src.voice_gateway.tts.base import TTSProvider, TTSProviderError
 from backend.src.voice_gateway.tts.openai_compatible import OpenAICompatibleTTS
@@ -34,7 +37,9 @@ class VoicePipeline:
         tts: TTSProvider | None,
         *,
         deadline_seconds: float = 180.0,
+        knowledge: KnowledgeStore | None = None,
     ) -> None:
+        self.knowledge = knowledge
         self.stt = stt
         self.agent = agent
         self.hermes = hermes
@@ -50,8 +55,6 @@ class VoicePipeline:
             raise VoicePipelineError("stt_failed")
         if self.agent is None and self.hermes is None:
             raise VoicePipelineError("agent_unavailable")
-        if self.tts is None:
-            raise VoicePipelineError("tts_failed")
         turn_dir = Path(job["audio_path"]).parent
         input_wav = turn_dir / "input.wav"
         output_part = turn_dir / "reply.wav.part"
@@ -61,17 +64,33 @@ class VoicePipeline:
                 await asyncio.to_thread(self._pcm_to_wav, Path(job["audio_path"]), input_wav)
                 if report_progress:
                     report_progress("transcribing")
-                if isinstance(self.stt, OpenAICompatibleSTT):
+                if (turn_dir / "transcript.txt").exists():
+                    transcript = Transcript(text=(turn_dir / "transcript.txt").read_text(), language="ru")
+                elif isinstance(self.stt, OpenAICompatibleSTT):
                     transcript = await self.stt.transcribe_async(input_wav)
                 else:
                     transcript = await asyncio.to_thread(self.stt.transcribe, input_wav)
                 if not transcript.text.strip():
                     raise VoicePipelineError("stt_failed")
+                atomic_write_bytes(turn_dir / "transcript.txt", transcript.text.encode("utf-8"))
+                source_id, context, receipt = None, None, None
+                if self.knowledge is not None:
+                    source_id = await asyncio.to_thread(self.knowledge.capture, job, transcript.text)
+                    receipt = await asyncio.to_thread(self.knowledge.receipt, source_id)
+                    context_path = turn_dir / "knowledge-context.json"
+                    if context_path.exists():
+                        context = json.loads(context_path.read_text())
+                    else:
+                        context = await asyncio.to_thread(self.knowledge.context, job["device_id"], source_id, transcript.text)
+                        atomic_write_json(context_path, context)
                 if report_progress:
                     report_progress("thinking")
-                if self.agent is not None:
+                if receipt is not None:
+                    response = HermesResponse(reply=receipt["reply"])
+                    metadata = {"provider": "knowledge", "model": None}
+                elif self.agent is not None:
                     reply = await self.agent.complete(
-                        AgentRequest(job["request_id"], job["device_id"], transcript.text)
+                        AgentRequest(job["request_id"], job["device_id"], transcript.text, context)
                     )
                     response = HermesResponse.model_validate(
                         {
@@ -85,6 +104,19 @@ class VoicePipeline:
                 else:
                     response = await self.hermes.run(transcript.text)
                     metadata = {"provider": "hermes", "model": None}
+                if self.knowledge is not None and receipt is None:
+                    atomic_write_json(turn_dir / "knowledge-proposal.json", response.model_dump())
+                    try:
+                        receipt = await asyncio.to_thread(self.knowledge.publish, source_id, job["device_id"],
+                                                          response.note, context, response.reply)
+                        response.reply = receipt["reply"]
+                    except KnowledgeConflict:
+                        receipt = {"source_id": source_id, "status": "needs_review"}
+                        response.reply = "Исходная запись сохранена. Обновление заметок требует проверки; существующие правки не перезаписаны."
+                    atomic_write_json(turn_dir / "knowledge-result.json", receipt)
+                atomic_write_bytes(turn_dir / "reply.txt", response.reply.encode("utf-8"))
+                if self.tts is None:
+                    raise VoicePipelineError("tts_failed")
                 if report_progress:
                     report_progress("synthesizing")
                 synthesis = asyncio.create_task(

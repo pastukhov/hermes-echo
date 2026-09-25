@@ -91,3 +91,42 @@ def test_pipeline_rejects_wrong_reply_sample_rate(tmp_path):
         assert not (tmp_path / "reply.wav").exists()
 
     asyncio.run(scenario())
+
+
+def test_wiki_survives_tts_failure_and_retry_does_not_call_agent_twice(tmp_path):
+    from backend.src.voice_gateway.knowledge.store import KnowledgeStore
+    from backend.src.voice_gateway.tts.base import TTSProviderError
+
+    class WikiAgent(FakeAgent):
+        async def complete(self, request):
+            self.requests.append(request)
+            source = request.knowledge_context['source_id']
+            return AgentReply('Уже сохранил', dict(create=True, title='Тестовая идея', content='Не терять мысли',
+                tags=['тест'], knowledge=dict(operation='capture', pages=[dict(
+                    path='wiki/concepts/capture.md', title='Запись идей', content='Не терять мысли',
+                    sources=[source])])), 't1', 'model', 'codex')
+
+    class BrokenTTS:
+        def synthesize(self, *args):
+            raise TTSProviderError('unavailable')
+
+    async def scenario():
+        vault = tmp_path / 'vault'
+        vault.mkdir()
+        knowledge = KnowledgeStore(vault, tmp_path / 'state')
+        audio = tmp_path / 'input.pcm'
+        audio.write_bytes(b'\0\0' * 100)
+        job = dict(audio_path=str(audio), turn_id='t1', request_id='r1', device_id='mic',
+                   created_at='2026-09-25', audio_bytes=200)
+        agent = WikiAgent()
+        pipeline = VoicePipeline(FakeSTT(), agent, None, BrokenTTS(), knowledge=knowledge)
+        with pytest.raises(VoicePipelineError):
+            await pipeline.run(job)
+        assert len(list((vault / 'Hermes/ideas').glob('*.md'))) == 1
+        assert (tmp_path / 'transcript.txt').exists()
+        pipeline.tts = FakeTTS()
+        await pipeline.run(job)
+        assert len(agent.requests) == 1
+        assert len(list((vault / 'Hermes/ideas').glob('*.md'))) == 1
+        assert (tmp_path / 'reply.txt').read_text().startswith('Сохранил мысль')
+    asyncio.run(scenario())

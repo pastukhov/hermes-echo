@@ -5,11 +5,13 @@
 #include "esp_http_client.h"
 #include "voice_wireguard.h"
 #include "esp_timer.h"
+#include "esp_log.h"
 #include "freertos/task.h"
 #include "wav_parser.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #define TURN_HTTP_TIMEOUT_MS 5000
 #define TURN_JSON_CAPACITY 384
@@ -19,6 +21,18 @@ typedef struct {
   wav_parser_t *parser;
   bool invalid_format;
 } wav_stream_sink_t;
+
+// esp_http_client_get_header reads outgoing request headers. Capture the
+// server's Content-Type from the response event instead.
+static esp_err_t response_event(esp_http_client_event_t *event) {
+  voice_turn_http_t *http = event->user_data;
+  if (event->event_id == HTTP_EVENT_ON_HEADER && event->header_key &&
+      event->header_value && strcasecmp(event->header_key, "Content-Type") == 0) {
+    strlcpy(http->response_content_type, event->header_value,
+            sizeof(http->response_content_type));
+  }
+  return ESP_OK;
+}
 
 static bool make_url(const voice_turn_http_t *http, const char *path,
                      char *out, size_t capacity) {
@@ -36,7 +50,12 @@ static esp_http_client_handle_t open_request(voice_turn_http_t *http,
   if (!voice_wireguard_ready()) return NULL;
   char url[256];
   if (!make_url(http, path, url, sizeof(url))) return NULL;
-  esp_http_client_config_t config = {.url = url, .if_name = voice_wireguard_interface(), .timeout_ms = TURN_HTTP_TIMEOUT_MS};
+  http->response_content_type[0] = '\0';
+  esp_http_client_config_t config = {
+    .url = url, .if_name = voice_wireguard_interface(),
+    .timeout_ms = TURN_HTTP_TIMEOUT_MS,
+    .event_handler = response_event, .user_data = http,
+  };
   esp_http_client_handle_t client = esp_http_client_init(&config);
   if (!client) return NULL;
   esp_http_client_set_method(client, strcmp(method, "POST") == 0
@@ -143,13 +162,11 @@ static voice_turn_io_result_t download_audio(void *ctx, const char *turn_id,
   esp_http_client_handle_t client = open_request(http, "GET", path, &status);
   if (!client) return VOICE_TURN_IO_RETRY;
   response->http_status = status;
-  char *content_type = NULL;
-  if (esp_http_client_get_header(client, "Content-Type", &content_type) != ESP_OK)
-    content_type = NULL;
-  if (content_type) strlcpy(response->content_type, content_type,
-                            sizeof(response->content_type));
-  if (status != 200 || !content_type ||
-      !voice_turn_audio_response_valid(status, content_type, 24000, 1, 16)) {
+  const char *content_type = http->response_content_type;
+  strlcpy(response->content_type, content_type, sizeof(response->content_type));
+  if (!voice_turn_audio_response_valid(status, content_type, 24000, 1, 16)) {
+    ESP_LOGE("voice_http", "invalid audio response: HTTP %d, type %s",
+             status, content_type);
     close_request(client);
     return status >= 500 ? VOICE_TURN_IO_RETRY : VOICE_TURN_IO_FATAL;
   }
@@ -190,6 +207,8 @@ static voice_turn_io_result_t download_audio(void *ctx, const char *turn_id,
     response->sample_rate = parser.format.sample_rate;
     response->channels = parser.format.channels;
     response->bits_per_sample = parser.format.bits_per_sample;
+    ESP_LOGI("voice_http", "audio download complete: %lu Hz, %u channel(s)",
+             (unsigned long)response->sample_rate, response->channels);
   }
   close_request(client);
   if (result == VOICE_TURN_IO_RETRY && http->audio_started &&

@@ -11,6 +11,7 @@ typedef struct {
   char gateway_base[192];
   char device_id[64];
   char token[192];
+  char response_content_type[64];
   StreamBufferHandle_t audio_stream;
   volatile bool *cancel_requested;
   volatile bool *audio_started;

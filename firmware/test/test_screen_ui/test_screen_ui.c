@@ -109,8 +109,22 @@ void test_processing_screen_names_each_backend_stage(void) {
       screen_font_measure(SCREEN_FONT_HINT, synthesizing.hint));
 }
 
+void test_idle_waits_for_wifi_and_vpn_before_showing_ready(void) {
+  screen_ui_view_t wifi = screen_ui_view_with_network(STATE_IDLE, SCREEN_PROCESSING_THINKING, false, false);
+  screen_ui_view_t vpn = screen_ui_view_with_network(STATE_IDLE, SCREEN_PROCESSING_THINKING, true, false);
+  screen_ui_view_t ready = screen_ui_view_with_network(STATE_IDLE, SCREEN_PROCESSING_THINKING, true, true);
+  TEST_ASSERT_EQUAL_STRING("СЕТЬ", wifi.title);
+  TEST_ASSERT_EQUAL_STRING("VPN", vpn.title);
+  TEST_ASSERT_EQUAL_STRING("ГОТОВ", ready.title);
+  TEST_ASSERT_EQUAL_STRING("СЕТЬ", screen_ui_view_with_network(STATE_IDLE, SCREEN_PROCESSING_THINKING, false, true).title);
+  TEST_ASSERT_EQUAL_STRING("СЛУШАЮ", screen_ui_view_with_network(STATE_RECORDING, SCREEN_PROCESSING_THINKING, false, false).title);
+  TEST_ASSERT_LESS_OR_EQUAL_INT(115, screen_font_measure(SCREEN_FONT_HINT, wifi.hint));
+  TEST_ASSERT_LESS_OR_EQUAL_INT(115, screen_font_measure(SCREEN_FONT_HINT, vpn.hint));
+}
+
 int main(void) {
   UNITY_BEGIN();
+  RUN_TEST(test_idle_waits_for_wifi_and_vpn_before_showing_ready);
   RUN_TEST(test_each_voice_state_has_clear_screen_copy_and_accent);
   RUN_TEST(test_montserrat_draws_cyrillic_letters_distinctly);
   RUN_TEST(test_montserrat_draws_every_digit_of_device_id);

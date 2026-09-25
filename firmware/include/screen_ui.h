@@ -2,6 +2,7 @@
 #define SCREEN_UI_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "state_machine.h"
 
 typedef enum {
@@ -26,6 +27,8 @@ typedef struct {
 } screen_ui_view_t;
 
 screen_ui_view_t screen_ui_view(state_t state);
+screen_ui_view_t screen_ui_view_with_network(state_t state, screen_processing_phase_t phase,
+                                             bool wifi_connected, bool vpn_ready);
 screen_ui_view_t screen_ui_view_with_phase(state_t state,
                                            screen_processing_phase_t phase);
 

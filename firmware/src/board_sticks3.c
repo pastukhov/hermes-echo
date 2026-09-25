@@ -517,7 +517,8 @@ void board_sticks3_display_update(state_t state, uint32_t now_ms,
   if (!s_screen) s_screen = heap_caps_malloc(SCREEN_W * SCREEN_H * sizeof(*s_screen), MALLOC_CAP_8BIT);
   if (!s_screen) return;
   lcd_init();
-  screen_ui_view_t view = screen_ui_view_with_phase(state, processing_phase);
+  screen_ui_view_t view = screen_ui_view_with_network(state, processing_phase,
+                                                        s_wifi_connected, voice_wireguard_ready());
   for (int i = 0; i < SCREEN_W * SCREEN_H; ++i) s_screen[i] = C_BG;
   screen_font_draw_centered(s_screen, SCREEN_W, SCREEN_H, 42, 13,
                             SCREEN_FONT_SMALL, "ГЕРМЕС", C_WHITE);
@@ -624,4 +625,9 @@ size_t hw_audio_playback_write(const uint8_t *buf, size_t size) {
 }
 bool hw_audio_playback_drained(void) {
   return audio_playback_get_buffer_level() == 0;
+}
+
+
+bool board_sticks3_network_ready(void) {
+  return s_wifi_connected && voice_wireguard_ready();
 }

@@ -53,6 +53,7 @@ void board_sticks3_power_tick(bool busy, uint32_t now_ms, uint32_t timeout_ms);
 #include "voice_wifi_profiles.h"
 bool board_sticks3_wifi_start(const voice_wifi_profile_t profiles[VOICE_WIFI_PROFILE_COUNT]);
 bool board_sticks3_wifi_start_ap(void);
+bool board_sticks3_network_ready(void);
 void board_sticks3_log_memory(void);
 void board_sticks3_display_set_device_id(const char *device_id);
 void board_sticks3_display_update(state_t state, uint32_t now_ms,

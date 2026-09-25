@@ -761,6 +761,9 @@ void app_tick(void) {
       }
       button_event_t ev = button_poll(&app.btn, hw_button_raw(), now);
       if (ev == BUTTON_EVENT_PRESSED) {
+#ifdef ESP_PLATFORM
+        if (!board_sticks3_network_ready()) break;
+#endif
         if (recording_start()) enter_state(STATE_RECORDING, NULL);
         else enter_state(STATE_ERROR, "voice recording start failed");
       }

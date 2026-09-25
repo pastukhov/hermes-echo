@@ -26,3 +26,15 @@ screen_ui_view_t screen_ui_view_with_phase(state_t state,
 screen_ui_view_t screen_ui_view(state_t state) {
   return screen_ui_view_with_phase(state, SCREEN_PROCESSING_THINKING);
 }
+
+
+screen_ui_view_t screen_ui_view_with_network(state_t state, screen_processing_phase_t phase,
+                                             bool wifi_connected, bool vpn_ready) {
+  if (state == STATE_IDLE) {
+    if (!wifi_connected)
+      return (screen_ui_view_t){"СЕТЬ", "ОЖИДАЮ WI-FI", 0xF5A8, SCREEN_ICON_THINKING};
+    if (!vpn_ready)
+      return (screen_ui_view_t){"VPN", "ОЖИДАЮ VPN", 0xF5A8, SCREEN_ICON_THINKING};
+  }
+  return screen_ui_view_with_phase(state, phase);
+}
